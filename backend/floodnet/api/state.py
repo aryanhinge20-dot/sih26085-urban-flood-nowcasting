@@ -5,9 +5,13 @@ callers turn `ModuleMissing` into HTTP 503 with an informative message.
 """
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import threading
+import uuid
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Any, Optional
 
 import numpy as np
@@ -104,11 +108,29 @@ def get_pilot() -> dict:
         return _pilot
 
 
+def _clear_derived_caches() -> None:
+    """The `id(roads)`/`id(...)` caches below (street_fn here; routing graph + snap KDTree in
+    floodnet.routing.router) are only safe while the cached `roads` object stays alive somewhere with a
+    strong reference (normally: as _pilot["roads"], for the life of the process) -- Python can reuse a freed
+    object's id(), which would otherwise let a stale cache entry silently match a *different* new RoadGraph.
+    set_pilot/reset_pilot are the only places `roads` is ever replaced (tests / integrator override), so
+    clear every such cache there. Also drops memoized simulation results (_run_scenario_cached): a swapped
+    pilot can reuse the same scenario ids (e.g. synthetic fixtures) over different terrain/network data."""
+    _street_fn_cache.clear()
+    clear_scenario_cache()
+    try:
+        from ..routing import router
+        router.clear_caches()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def set_pilot(pilot: dict, data_mode: str) -> None:
     """Test hook / integrator override."""
     global _pilot, _pilot_error, _data_mode
     with _pilot_lock:
         _pilot, _pilot_error, _data_mode = _normalize(pilot), None, data_mode
+        _clear_derived_caches()
 
 
 def data_mode() -> str:
@@ -119,6 +141,7 @@ def reset_pilot() -> None:
     global _pilot, _pilot_error, _data_mode
     with _pilot_lock:
         _pilot, _pilot_error, _data_mode = None, None, "UNLOADED"
+        _clear_derived_caches()
 
 
 def pilot_provenance(p: dict) -> dict:
@@ -180,14 +203,31 @@ def build_models(terrain, net) -> tuple[Any, Any, Any]:
     return StorageCellSurface(terrain, open_boundary=True), GraphDrainage(net), runoff_fn
 
 
+_street_fn_cache: dict[int, Any] = {}
+
+
 def street_fn_for(roads, grid):
-    """street_fn from Agent F, or None (frames will then carry no per-street depth)."""
+    """street_fn from Agent F, or None (frames will then carry no per-street depth).
+
+    `_cells_per_segment` (inside make_street_fn) does a shapely buffer + contains_xy per road segment -- real
+    work, and `roads`/`grid` are the same immutable pilot objects on every simulate call, so it was being
+    rebuilt from scratch on every /api/simulate request for no reason. Cached by `id(roads)`: the pilot is
+    loaded once per process (see get_pilot) and never replaced except via set_pilot/reset_pilot in tests, at
+    which point a new `roads` object (new id) naturally gets a fresh entry."""
+    if roads is None:
+        return None
+    key = id(roads)
+    fn = _street_fn_cache.get(key)
+    if fn is not None:
+        return fn
     try:
         from ..streets.aggregate import make_street_fn
-        return make_street_fn(roads, grid)
+        fn = make_street_fn(roads, grid)
     except Exception as e:  # noqa: BLE001
         log.warning("floodnet.streets.aggregate.make_street_fn unavailable: %s (street depths disabled)", e)
         return None
+    _street_fn_cache[key] = fn
+    return fn
 
 
 def _blockage_fallback(net, spec: dict):
@@ -236,13 +276,26 @@ def apply_blockage(net, spec: dict):
         return _blockage_fallback(net, spec)
 
 
-def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
-    """Blocking; call via run_in_threadpool. Holds sim_lock."""
+def _canon_blockage(spec: Optional[dict]) -> str:
+    return json.dumps(spec or {"mode": "none"}, sort_keys=True, default=str)
+
+
+@lru_cache(maxsize=8)
+def _run_scenario_cached(scenario_id: str, blockage_json: str, horizon_min: int) -> SimulationResult:
+    """The actual physics run, memoized by the fully-canonicalised request. A simulation is deterministic
+    given (scenario_id, blockage spec, horizon) -- the engine has no randomness -- so an identical repeat
+    request (the frontend re-opening a scenario, /api/compare's 'normal' side reused across several
+    'blocked' variants, a client retry) is pure recomputation otherwise. `run_scenario` below still mints a
+    fresh run_id and a fresh `_runs` entry on every call, so the REST contract (each POST /api/simulate
+    returns its own run_id) is unchanged -- only the expensive physics loop is shared. Bounded to 8 entries
+    (each holds ~37 frames of full-grid state) since this is meant to catch the handful of requests a demo
+    session actually repeats, not to cache unboundedly."""
     from ..simulation.engine import run_simulation
     p = get_pilot()
     scen = p["scenarios"].get(scenario_id)
     if scen is None:
         raise KeyError(scenario_id)
+    blockage = json.loads(blockage_json)
     net = apply_blockage(p["net"], blockage)
     terrain = p["terrain"]
     with sim_lock:
@@ -254,5 +307,19 @@ def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> Simulati
     res.provenance = dict(res.provenance)
     res.provenance["roads"] = (p["roads"].provenance.to_dict() if p.get("roads") is not None else None)
     res.provenance["data_mode"] = _data_mode
+    return res
+
+
+def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
+    """Blocking; call via run_in_threadpool."""
+    cached = _run_scenario_cached(scenario_id, _canon_blockage(blockage), int(horizon_min))
+    res = copy.copy(cached)   # fresh run_id/cache-slot per call; frames/mass_balance/provenance shared read-only
+    res.run_id = uuid.uuid4().hex[:10]
     put_run(res)
     return res
+
+
+def clear_scenario_cache() -> None:
+    """Test hook: drop memoized simulation results (paired with set_pilot/reset_pilot in tests that swap
+    pilot data but reuse scenario ids, which would otherwise return a stale cached run)."""
+    _run_scenario_cached.cache_clear()

@@ -321,7 +321,36 @@ Recorded so that we resolve them deliberately and can tell a judge how we interp
 
 ---
 
+## 5. Implementation status (backend, updated 2026-09-09)
+
+Section 3 above was written before implementation and deliberately left the technical component
+undecided. All D-01..D-13 decisions in `docs/DECISIONS.md` are now DECIDED, and the pilot backend
+(`backend/floodnet/`) is running against the real Mumbai Hindmata/Dadar network. Status key: **COMPLETE**
+(implemented and verified against real/cited data), **PARTIAL** (implemented but with a stated, real gap),
+**DEMONSTRATION ONLY** (works but not on live/verified data), **SCIENTIFIC LIMITATION** (implemented, but a
+known modelling simplification is documented rather than hidden — see `docs/VALIDATION.md`).
+
+| SR | Status | Evidence |
+|---|---|---|
+| SR-01 rainfall nowcast input | **PARTIAL** | `floodnet/rainfall/provider.py`: `ScenarioProvider` (SYNTHETIC design storms) + `HistoricalReplayProvider` (REAL, 26 July 2005 Santacruz gauge, hourly) are live; `ExternalNowcastProvider` is a documented interface stub that raises `NotImplementedError` rather than fabricate a live radar/IMD feed — no live nowcast source is connected in this prototype. |
+| SR-02 0–3 h horizon | **COMPLETE** | `simulation/engine.py::run_simulation(horizon_s=..., frame_dt_s=300)`; API `horizon_min` 5–720, default 180; 37 frames at 5-min resolution. |
+| SR-03 high-resolution DEM | **COMPLETE**, with a stated caveat | Real MCGM 20 cm contour-derived DTM, 10 m grid; agrees with 1,205 surveyed manhole ground levels to mean +0.012 m / SD 0.283 m pilot-wide; 0.65% of the grid (407 cells) is flagged (not altered) as inconsistent with the surveyed network — see `docs/validation/EXTREME_DEPTH.md`. |
+| SR-04 imperviousness/runoff | **COMPLETE** | OSM-derived impervious fraction (ESTIMATED) driving the rational-method runoff coefficient in `terrain/runoff.py`. |
+| SR-05 2D surface routing | **COMPLETE**, **SCIENTIFIC LIMITATION** noted | Storage-cell diffusive-wave scheme (`terrain/surface.py`, Bates & De Roo 2000 family) with an open (free-outfall) domain boundary; no lateral-momentum term — documented as the likely cause of the still-open `july2005` extreme-depth question in `docs/VALIDATION.md` §5/§9. |
+| SR-06 directed drainage graph | **COMPLETE** | Real MCGM stormwater network (`data/mcgm.py`), real inverts/diameters/connectivity where published, ESTIMATED roughness (cited). |
+| SR-07 hydraulic capacity | **COMPLETE**, cross-checked | Manning capacity-limited solver (`drainage/hydraulics.py`); cross-checked against a real PySWMM/DYNWAVE run on the same network (`floodnet/validation/swmm_compare.py`) — edge-flow ranking agrees (Spearman 0.74), node-level agreement is weak (Jaccard 0.10) for an explained, documented reason (capacity-limited vs. full Saint-Venant with backwater), not silently reconciled. |
+| SR-08 blockage/overcapacity surcharge | **COMPLETE** | `drainage/scenarios.py::apply_blockage` + surcharge-to-surface coupling; verified every run via `scripts/demo_check.py` (blocked > normal on surcharge, surface water, flooded segments; blocked ≤ normal on outfall discharge). |
+| SR-09 coupled framework | **COMPLETE** | One loop, `simulation/engine.py::run_simulation` — rainfall → runoff → surface → inlet capture → drainage → surcharge → surface → frame, every step exchanging real arrays; no hardcoded or frontend-generated flood values (checked: `frontend/*.js` contains no random/mock data generation). |
+| SR-10 street/intersection attribution | **COMPLETE** | `streets/aggregate.py::make_street_fn` (grid depth → per-segment max, now cached per pilot); per-node `Frame.node_cause` ("overcapacity"/"blockage"/"downstream") already served over the API; a structured `GET /api/simulation/{run_id}/explain/{seg_id}` endpoint (this pass) adds depth/rainfall/nearest-drainage-node/dominant-cause in one response. |
+| SR-11 depth in cm | **COMPLETE** | Metres internally, cm only at the API/UI boundary (`api/main.py::serialize_frame`, `streets_geojson`). |
+| SR-12 dynamic GIS dashboard | **PARTIAL** | Functional Leaflet dashboard exists and is exercised by `scripts/demo_check.py`'s `frontend_loads`/`api_*` checks; React migration is explicitly out of scope for this backend-focused pass. |
+| SR-13 real-time / instant | **PARTIAL** | A fresh full-pilot 3 h simulation takes on the order of a minute server-side (measured this pass, `heavy` scenario, real pilot grid) — not sub-second, but within a live-demo budget; identical repeat requests and all read-only endpoints (frame/series/route/status/explain) are sub-second via the caching added this pass. No claim of true real-time streaming ingestion is made. |
+| SR-14 flood-safe routing API | **COMPLETE** | `POST /api/route`; regression tests prove the route changes because of predicted flooding (`tests/test_routing_router.py::test_flooded_middle_segment_forces_detour`, `::test_blocked_destination_unreachable`); routing graph construction now cached per pilot rather than rebuilt per call. |
+
+SR-15/SR-16 are about audience differentiation and city applicability, not a backend component; unchanged
+from `docs/DECISIONS.md` D-01 (Mumbai, locked).
+
 ## Related documents
 
 - `docs/PRD.md` — what we are building, including everything that is **ours** rather than SIH's.
-- `docs/DECISIONS.md` — open technical decisions. All currently **UNDECIDED**.
+- `docs/DECISIONS.md` — all D-01..D-13 are DECIDED (see that file for evidence per decision).

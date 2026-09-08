@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class BlockageSpec(BaseModel):
@@ -38,6 +38,15 @@ class CompareRequest(BaseModel):
 class RouteRequest(BaseModel):
     origin: list[float] = Field(min_length=2, max_length=2, description="[lon, lat]")
     dest: list[float] = Field(min_length=2, max_length=2, description="[lon, lat]")
-    t_min: float = 0.0
+    t_min: float = Field(default=0.0, ge=0.0)
     vehicle: str = "car"
     run_id: Optional[str] = None
+
+    @field_validator("origin", "dest")
+    @classmethod
+    def _valid_lonlat(cls, v: list[float]) -> list[float]:
+        lon, lat = v[0], v[1]
+        if not (-180.0 <= lon <= 180.0) or not (-90.0 <= lat <= 90.0):
+            raise ValueError(f"coordinate out of range: lon={lon}, lat={lat} "
+                              "(expected abs(lon)<=180, abs(lat)<=90)")
+        return v

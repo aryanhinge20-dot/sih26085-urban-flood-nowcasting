@@ -62,6 +62,20 @@ def health():
     return {"ok": True, "data_mode": state.data_mode(), "runs": state.list_runs()}
 
 
+@app.get("/api/status")
+def status():
+    """Richer health check: also lists the rainfall sources available today (see floodnet.rainfall)."""
+    from ..rainfall.provider import provider_status
+    return {"ok": True, "data_mode": state.data_mode(), "runs": state.list_runs(),
+            "rainfall_providers": provider_status()}
+
+
+@app.get("/api/provenance")
+def provenance():
+    p = _pilot()
+    return {**state.pilot_provenance(p), "attribution": state.ATTRIBUTION}
+
+
 # ----------------------------------------------------------------------------- meta / topology / terrain
 @app.get("/api/meta")
 def meta():
@@ -159,7 +173,14 @@ def hotspots():
 @app.get("/api/scenarios")
 def scenarios():
     p = _pilot()
-    return [s.to_dict() for s in p["scenarios"].values()]
+    from ..rainfall.provider import get_source_meta
+    out = []
+    for s in p["scenarios"].values():
+        d = s.to_dict()
+        meta = get_source_meta(s.id)
+        d["source"] = meta.to_dict() if meta is not None else None
+        out.append(d)
+    return out
 
 
 # ----------------------------------------------------------------------------- simulation serialisation
@@ -289,8 +310,22 @@ async def simulate(req: SimulateRequest):
     return summarize(res)
 
 
+@app.get("/api/simulate/{run_id}")
+def get_simulate(run_id: str):
+    """GET analog of POST /api/simulate's result: re-fetch an existing cached run's summary cheaply,
+    without re-running the physics."""
+    res = _get_run_or_404(run_id)
+    return summarize(res)
+
+
+def _check_t_min(t_min: float) -> None:
+    if t_min < 0:
+        raise HTTPException(422, f"t_min must be >= 0, got {t_min!r}")
+
+
 @app.get("/api/simulation/{run_id}/frame/{t_min}")
 def frame(run_id: str, t_min: float):
+    _check_t_min(t_min)
     res = _get_run_or_404(run_id)
     return serialize_frame(res, _frame_index(res, t_min))
 
@@ -307,6 +342,111 @@ def series(run_id: str):
             "max_depth_cm": [_frame_max_cm(f) for f in fr],
             "surcharge_m3": [_f(f.node_surcharge_m3.sum()) for f in fr],
             "streets": streets, "provenance": res.provenance, "data_mode": state.data_mode()}
+
+
+# ----------------------------------------------------------------------------- explain a road segment
+_DOMINANT_CAUSE_MAP = {"overcapacity": "drainage_overcapacity", "blockage": "drainage_blockage",
+                       "downstream": "drainage_downstream_backup"}
+
+
+def _segment_midpoint_xy(seg) -> tuple[float, float]:
+    """Geometric midpoint (by arc length) of a RoadSegment's polyline, in EPSG:32643."""
+    xy = np.asarray(seg.xy, dtype=float)
+    if len(xy) == 0:
+        return 0.0, 0.0
+    if len(xy) == 1:
+        return float(xy[0, 0]), float(xy[0, 1])
+    step = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1]))
+    cum = np.concatenate([[0.0], np.cumsum(step)])
+    total = float(cum[-1])
+    if total <= 0:
+        return float(xy[0, 0]), float(xy[0, 1])
+    half = total / 2.0
+    k = int(np.searchsorted(cum, half))
+    k = max(1, min(k, len(xy) - 1))
+    span = cum[k] - cum[k - 1]
+    t = (half - cum[k - 1]) / span if span > 0 else 0.0
+    x = xy[k - 1, 0] + t * (xy[k, 0] - xy[k - 1, 0])
+    y = xy[k - 1, 1] + t * (xy[k, 1] - xy[k - 1, 1])
+    return float(x), float(y)
+
+
+def _find_segment(roads_graph, seg_id: str):
+    for s in roads_graph.segments:
+        if s.seg_id == seg_id:
+            return s
+    return None
+
+
+def _peak_frame_index(res: SimulationResult, seg_id: str) -> int:
+    """Frame at which this segment's depth peaks over the run (default t_min for /explain)."""
+    depths = [float(f.street_depth_m.get(seg_id, 0.0)) for f in res.frames]
+    return int(np.argmax(depths)) if depths else 0
+
+
+@app.get("/api/simulation/{run_id}/explain/{seg_id}")
+def explain(run_id: str, seg_id: str, t_min: Optional[float] = None):
+    """Explain a road segment's flood state at a given time: its depth, the nearest drainage node and
+    why it is (or isn't) surcharging, and the ground elevation under it.
+
+    Default t_min (query param omitted): the frame where this segment's depth peaks over the run.
+    Every value here is read from the already-computed SimulationResult / pilot data -- nothing here is a
+    fabricated confidence score or an invented field the engine doesn't actually produce.
+    """
+    if t_min is not None:
+        _check_t_min(t_min)
+    res = _get_run_or_404(run_id)
+    p = _pilot()
+    roads_graph = p.get("roads")
+    if roads_graph is None:
+        raise state.ModuleMissing("roads not present in pilot bundle; cannot explain a road segment")
+    seg = _find_segment(roads_graph, seg_id)
+    if seg is None:
+        raise HTTPException(404, f"unknown seg_id {seg_id!r}")
+
+    k = _frame_index(res, t_min) if t_min is not None else _peak_frame_index(res, seg_id)
+    f = res.frames[k]
+    depth_cm = _f(f.street_depth_m.get(seg_id, 0.0)) * 100.0
+
+    net = p["net"]
+    mx, my = _segment_midpoint_xy(seg)
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.column_stack([net.node_x, net.node_y]))
+    dist, node_idx = tree.query([mx, my])
+    node_idx = int(node_idx)
+    incident = (net.edge_us == node_idx) | (net.edge_ds == node_idx)
+    utilization = _f(f.edge_util[incident].max()) if incident.any() else 0.0
+    node_cause_raw = str(f.node_cause[node_idx])
+    surcharging = bool(f.node_surcharging[node_idx])
+    if node_cause_raw in _DOMINANT_CAUSE_MAP:
+        dominant_cause = _DOMINANT_CAUSE_MAP[node_cause_raw]
+    elif depth_cm > 0:
+        dominant_cause = "surface_ponding_only"
+    else:
+        dominant_cause = "unknown"
+
+    terrain = p["terrain"]; grid = terrain.grid
+    jarr, iarr = grid.cell_of(np.array([mx]), np.array([my]))
+    j, i = int(jarr[0]), int(iarr[0])
+    if bool(grid.inside(np.array([j]), np.array([i]))[0]):
+        ground_m = _f(terrain.z[j, i])
+        terrain_note = "ground elevation of the terrain grid cell under the segment's midpoint"
+    else:
+        ground_m = None
+        terrain_note = "segment midpoint falls outside the terrain grid; no elevation available"
+
+    net_prov = state.pilot_provenance(p)["network"]
+    return {"run_id": res.run_id, "seg_id": seg.seg_id, "seg_name": seg.name, "t_min": f.t_s / 60.0,
+            "depth_cm": round(depth_cm, 2), "severity": _severity(depth_cm),
+            "passable_car": _passable(depth_cm, "car"), "passable_ambulance": _passable(depth_cm, "ambulance"),
+            "rainfall_mm_h": _f(f.rain_mm_h),
+            "nearest_drainage_node": {"id": str(net.node_id[node_idx]), "distance_m": _f(dist),
+                                      "surcharging": surcharging, "cause": node_cause_raw,
+                                      "utilization": utilization},
+            "dominant_cause": dominant_cause,
+            "terrain_context": {"ground_elevation_m": ground_m, "note": terrain_note},
+            "provenance": {"roads": roads_graph.provenance.to_dict(), "network": net_prov,
+                           "terrain": terrain.provenance.to_dict()}}
 
 
 @app.get("/api/nowcast")
