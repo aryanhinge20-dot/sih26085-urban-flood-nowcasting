@@ -1,0 +1,13 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+# node
+node_modules/
+# large raw caches (keep the MCGM network snapshot; ignore bulky fetches)
+data/raw/osm/*.pbf
+# os
+.DS_Store
+Thumbs.db
