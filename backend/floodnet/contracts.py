@@ -160,6 +160,7 @@ class MassBalance:
     error_pct: float
     abstraction_m3: float = 0.0      # rain that never became runoff (runoff-coefficient losses); counted so the balance closes
     runoff_in_m3: float = 0.0        # net runoff delivered to the surface
+    boundary_out_m3: float = 0.0     # volume that left the domain through the open (clip-line) boundary
 
 
 @dataclass

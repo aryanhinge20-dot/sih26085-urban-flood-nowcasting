@@ -41,11 +41,14 @@ PROVENANCE = Provenance(
 )
 
 
+BND_MIN_SLOPE = 1e-3   # floor on the outward friction slope at an open boundary (ESTIMATED)
+
+
 class StorageCellSurface:
     """Implements floodnet.contracts.SurfaceModel."""
 
     def __init__(self, terrain: Terrain, n: float = MANNING_N, infiltration_rate_mm_h: float = 0.0,
-                 dt_min_s: float = DT_MIN_S, cfl: float = CFL):
+                 dt_min_s: float = DT_MIN_S, cfl: float = CFL, open_boundary=None):
         self.terrain = terrain
         self.grid = terrain.grid
         self.res = float(self.grid.res)
@@ -62,6 +65,27 @@ class StorageCellSurface:
         self.infil_rate = float(infiltration_rate_mm_h) / 1000.0 / 3600.0
         self._infil_depth_rate = self.infil_rate * (1.0 - self.imp) * self.open
         self._infiltrated = 0.0
+        # Open (free-outfall) boundary. The pilot is a clip out of Mumbai; terrain that runs downhill out
+        # of the window must be able to carry water out of it, otherwise water ponds against the clip line.
+        # `open_boundary` may be None/False (closed), True (auto: edge cells sloping outward), or a mask.
+        if open_boundary is None or open_boundary is False:
+            self.open_boundary = np.zeros(self.z.shape, dtype=bool)
+        elif open_boundary is True:
+            from .pits import outward_open_boundary
+            self.open_boundary = outward_open_boundary(terrain)
+        else:
+            self.open_boundary = np.asarray(open_boundary, dtype=bool)
+        self._boundary_out = 0.0
+        # outward friction slope at the boundary = local terrain slope, floored so the outfall stays finite
+        self._bnd_sqrt_s = np.zeros(self.z.shape)
+        if self.open_boundary.any():
+            zz = self.z
+            sl = np.zeros_like(zz)
+            sl[0, :] = np.maximum(zz[1, :] - zz[0, :], 0.0) / self.res
+            sl[-1, :] = np.maximum(zz[-2, :] - zz[-1, :], 0.0) / self.res
+            sl[:, 0] = np.maximum(sl[:, 0], np.maximum(zz[:, 1] - zz[:, 0], 0.0) / self.res)
+            sl[:, -1] = np.maximum(sl[:, -1], np.maximum(zz[:, -2] - zz[:, -1], 0.0) / self.res)
+            self._bnd_sqrt_s = np.sqrt(np.maximum(sl, BND_MIN_SLOPE)) * self.open_boundary
         # precomputed face geometry (x-faces: between (j,i) and (j,i+1); y-faces: between (j,i) and (j+1,i))
         self.zmax_x = np.maximum(self.z[:, :-1], self.z[:, 1:])
         self.zmax_y = np.maximum(self.z[:-1, :], self.z[1:, :])
@@ -136,6 +160,13 @@ class StorageCellSurface:
         h[:, :-1] -= Vx; h[:, 1:] += Vx
         h[:-1, :] -= Vy; h[1:, :] += Vy
         np.maximum(h, 0.0, out=h)
+        if self.open_boundary.any():
+            # free outfall at the domain edge: q = (1/n) h^(5/3) sqrt(S) per unit width (m2/s)
+            hb = np.where(self.open_boundary, h, 0.0)
+            q = self.inv_n * hb * np.cbrt(hb * hb) * self._bnd_sqrt_s      # h^(5/3)
+            dh = np.minimum(hb, q * dt / self.res)
+            h -= dh
+            self._boundary_out += float(dh.sum()) * A
         if self.infil_rate > 0.0:
             inf = np.minimum(h, self._infil_depth_rate * dt)
             h -= inf
@@ -161,3 +192,7 @@ class StorageCellSurface:
 
     def infiltrated_m3(self) -> float:
         return float(self._infiltrated)
+
+    def boundary_out_m3(self) -> float:
+        """Cumulative volume that left the domain through the open boundary (m3)."""
+        return float(self._boundary_out)

@@ -1,0 +1,139 @@
+{
+ "horizon_min": 180,
+ "results": {
+  "moderate": {
+   "scenario": "moderate",
+   "blockage": {
+    "mode": "none"
+   },
+   "rain_in_m3": 248880.00000000515,
+   "runoff_in_m3": 201302.401591304,
+   "surface_stored_m3": 125090.66111016413,
+   "network_stored_m3": 16.376914665847806,
+   "outfall_out_m3": 66402.80750902649,
+   "boundary_out_m3": 9792.556057445116,
+   "mass_error_pct": 1.1855368234987108e-12,
+   "total_surcharge_m3": 2343.684814453125,
+   "peak_surcharging_nodes": 20,
+   "peak_flooded_segments_15cm": 508,
+   "max_cell_depth_m": 1.791713833808899,
+   "peak_edge_util": 1.0,
+   "runtime_s": 29.043166875839233
+  },
+  "heavy": {
+   "scenario": "heavy",
+   "blockage": {
+    "mode": "none"
+   },
+   "rain_in_m3": 622199.9999999994,
+   "runoff_in_m3": 503256.00397824193,
+   "surface_stored_m3": 297966.0366422564,
+   "network_stored_m3": 394.7811794718766,
+   "outfall_out_m3": 164624.35746534666,
+   "boundary_out_m3": 40270.82869117895,
+   "mass_error_pct": -2.3826398599096895e-12,
+   "total_surcharge_m3": 45751.30859375,
+   "peak_surcharging_nodes": 186,
+   "peak_flooded_segments_15cm": 1104,
+   "max_cell_depth_m": 2.6870181560516357,
+   "peak_edge_util": 1.0,
+   "runtime_s": 40.6013126373291
+  },
+  "cloudburst": {
+   "scenario": "cloudburst",
+   "blockage": {
+    "mode": "none"
+   },
+   "rain_in_m3": 467201.3115091716,
+   "runoff_in_m3": 377887.9220242804,
+   "surface_stored_m3": 221361.0746009781,
+   "network_stored_m3": 265.74642259211214,
+   "outfall_out_m3": 126756.88171105717,
+   "boundary_out_m3": 29504.219289656197,
+   "mass_error_pct": -8.47188058589236e-13,
+   "total_surcharge_m3": 39321.16796875,
+   "peak_surcharging_nodes": 218,
+   "peak_flooded_segments_15cm": 1027,
+   "max_cell_depth_m": 2.616224765777588,
+   "peak_edge_util": 1.0,
+   "runtime_s": 40.74599885940552
+  },
+  "july2005": {
+   "scenario": "july2005",
+   "blockage": {
+    "mode": "none"
+   },
+   "rain_in_m3": 2369337.5999999912,
+   "runoff_in_m3": 1916398.8631491987,
+   "surface_stored_m3": 1351689.3947140889,
+   "network_stored_m3": 1446.7029170913756,
+   "outfall_out_m3": 281464.5997249316,
+   "boundary_out_m3": 281798.1657930661,
+   "mass_error_pct": 1.0812951146893432e-12,
+   "total_surcharge_m3": 146732.921875,
+   "peak_surcharging_nodes": 371,
+   "peak_flooded_segments_15cm": 1917,
+   "max_cell_depth_m": 8.918563842773438,
+   "peak_edge_util": 1.0,
+   "runtime_s": 81.29192662239075
+  },
+  "heavy_blocked70": {
+   "scenario": "heavy",
+   "blockage": {
+    "mode": "fraction",
+    "fraction": 0.7
+   },
+   "rain_in_m3": 622199.9999999994,
+   "runoff_in_m3": 503256.00397824193,
+   "surface_stored_m3": 327277.580586008,
+   "network_stored_m3": 1062.20383995977,
+   "outfall_out_m3": 132747.77666828825,
+   "boundary_out_m3": 42168.44288400488,
+   "mass_error_pct": -3.770585409371645e-12,
+   "total_surcharge_m3": 124980.6953125,
+   "peak_surcharging_nodes": 424,
+   "peak_flooded_segments_15cm": 1197,
+   "max_cell_depth_m": 2.6872317790985107,
+   "peak_edge_util": 1.0,
+   "runtime_s": 34.55784821510315
+  },
+  "routing_probe_note": "wet_correctly_unreachable",
+  "routing_probe": {
+   "deepest_segment": "1478739236_0",
+   "name": "",
+   "depth_cm": 264.0,
+   "origin": [
+    72.836,
+    19.0103464
+   ],
+   "dest": [
+    72.84071780000001,
+    19.0103464
+   ],
+   "dry_length_m": 3910.4406290629213,
+   "wet_length_m": null,
+   "wet_reachable": false,
+   "avoided": 21,
+   "max_depth_on_wet_route_cm": null
+  }
+ },
+ "checks": {
+  "runoff_increases_with_rain": true,
+  "surface_water_increases_with_rain": true,
+  "surcharge_increases_with_rain": true,
+  "flooded_segments_increase_with_rain": true,
+  "drainage_responds": true,
+  "surcharge_where_capacity_exceeded": true,
+  "mass_balance_all_below_0.1pct": true,
+  "blocked_more_surcharge": true,
+  "blocked_more_surface_water": true,
+  "blocked_less_outfall": true,
+  "blocked_more_flooded_segments": true,
+  "route_avoids_flooded_segments": true,
+  "api_meta_ok": true,
+  "frontend_loads": true,
+  "api_simulate_ok": true,
+  "api_route_ok": true
+ },
+ "all_passed": true
+}

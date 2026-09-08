@@ -177,7 +177,7 @@ def build_models(terrain, net) -> tuple[Any, Any, Any]:
         from ..drainage.hydraulics import GraphDrainage
     except Exception as e:  # noqa: BLE001
         raise ModuleMissing(f"floodnet.drainage.hydraulics.GraphDrainage unavailable (Agent B): {e}") from e
-    return StorageCellSurface(terrain), GraphDrainage(net), runoff_fn
+    return StorageCellSurface(terrain, open_boundary=True), GraphDrainage(net), runoff_fn
 
 
 def street_fn_for(roads, grid):

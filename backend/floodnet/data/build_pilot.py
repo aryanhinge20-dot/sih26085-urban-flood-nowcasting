@@ -18,6 +18,7 @@ import numpy as np
 from ..config import (DATA_PROCESSED, PILOT_BBOX_LONLAT, PILOT_MARGIN_M, GRID_RES_M, PILOT_NAME)
 from ..contracts import Grid
 from ..provenance import Provenance, Tag
+from ..contracts import Terrain as _Terrain
 from . import mcgm, contours as contours_mod, osm as osm_mod, hotspots as hs_mod, scenarios as sc_mod
 
 log = logging.getLogger("floodnet.data.build_pilot")
@@ -89,11 +90,27 @@ def build(res: float = GRID_RES_M, include_proposal: bool = False, offline: bool
 
     np.savez_compressed(out_dir / "terrain.npz", z=z.astype(np.float32), impervious=imp.astype(np.float32),
                         building=bmask.astype(bool))
+    # DEM reliability flagging (Task 1/2 validation pass): the DTM is NOT modified. A handful of
+    # contour-derived cells sit far below every surveyed manhole ground level nearby; those cells are
+    # flagged (not altered) so the API/UI can exclude them from headline street-depth claims.
+    from ..terrain.pits import dem_reliability_mask
+    _terr_for_mask = _Terrain(grid=grid, z=z, impervious=imp, building=bmask,
+                              provenance=z_prov, impervious_provenance=imp_prov, building_provenance=b_prov)
+    reliability_mask, reliability_report = dem_reliability_mask(_terr_for_mask, net)
+    counts["dem_flagged_cells"] = reliability_report["n_cells_flagged"]
     with open(out_dir / "terrain.json", "w", encoding="utf-8") as fh:
         json.dump({"grid": grid.to_dict(), "z_stats": {"min": float(np.nanmin(z)), "max": float(np.nanmax(z)),
                                                        "datum": "mTHD (Town Hall Datum), MSL offset UNVERIFIED"},
                    "provenance": z_prov.to_dict(), "impervious_provenance": imp_prov.to_dict(),
-                   "building_provenance": b_prov.to_dict()}, fh)
+                   "building_provenance": b_prov.to_dict(),
+                   "pit_handling": {
+                       "dem_modified": False,
+                       "open_boundary": "auto (outward_open_boundary): edge cells sloping out of the clip "
+                                        "window act as a free outfall in the surface model, so water can "
+                                        "leave the pilot instead of ponding against the clip line",
+                       "dem_reliability_mask": reliability_report,
+                   }}, fh)
+    np.savez_compressed(out_dir / "dem_reliability_mask.npz", mask=reliability_mask.astype(bool))
     with open(out_dir / "roads.json", "w", encoding="utf-8") as fh:
         json.dump(osm_mod.roads_to_dict(roads), fh)
 

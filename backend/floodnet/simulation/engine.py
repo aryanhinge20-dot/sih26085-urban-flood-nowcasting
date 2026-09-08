@@ -77,11 +77,12 @@ def run_simulation(terrain: Terrain, net: DrainageNetwork, scenario: RainfallSce
             if progress: progress(t / horizon_s)
 
     surf = surface.total_volume_m3(); netv = drainage.stored_m3(); out = drainage.outflow_m3(); inf = surface.infiltrated_m3()
+    bout = float(surface.boundary_out_m3()) if hasattr(surface, "boundary_out_m3") else 0.0
     abstraction = rain_in - runoff_in
-    err = runoff_in - (surf + netv + out + inf)
+    err = runoff_in - (surf + netv + out + inf + bout)
     mb = MassBalance(rain_in_m3=rain_in, surface_stored_m3=surf, network_stored_m3=netv, outfall_out_m3=out,
                      infiltration_m3=inf, error_m3=err, error_pct=(100.0 * err / runoff_in) if runoff_in > 0 else 0.0,
-                     abstraction_m3=abstraction, runoff_in_m3=runoff_in)
+                     abstraction_m3=abstraction, runoff_in_m3=runoff_in, boundary_out_m3=bout)
     prov = {"terrain": terrain.provenance.to_dict(), "impervious": terrain.impervious_provenance.to_dict(),
             "buildings": terrain.building_provenance.to_dict(), "rainfall": scenario.provenance.to_dict(),
             "network": net.provenance}

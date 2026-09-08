@@ -1,8 +1,8 @@
 # Processed pilot dataset — Hindmata / Dadar pilot
 
-Built 2026-09-08T13:01:20+00:00 by `floodnet.data.build_pilot`. bbox (lon/lat) (72.835, 19.01, 72.855, 19.03), margin 150 m, grid 244x255 @ 10.0 m (EPSG:32643).
+Built 2026-09-08T18:35:40+00:00 by `floodnet.data.build_pilot`. bbox (lon/lat) (72.835, 19.01, 72.855, 19.03), margin 150 m, grid 244x255 @ 10.0 m (EPSG:32643).
 
-Counts: grid_nx=244, grid_ny=255, res_m=10.0, nodes=1233, edges=1134, outfalls=116, contours=2678, road_segments=2978, road_nodes=2321, building_cells=13320, hotspots=21, hotspots_active=5, scenarios=4
+Counts: grid_nx=244, grid_ny=255, res_m=10.0, nodes=1233, edges=1134, outfalls=116, contours=2678, road_segments=2978, road_nodes=2321, building_cells=13320, dem_flagged_cells=407, hotspots=21, hotspots_active=5, scenarios=4
 
 | Item | Tag | Source | Note |
 |---|---|---|---|

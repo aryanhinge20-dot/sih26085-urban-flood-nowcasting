@@ -1,0 +1,430 @@
+"""Spatial-pattern check of modelled flooding against MCGM "Flooding Spots" (layer 344) and Chitale-2005 named roads.
+
+MEASUREMENT ONLY. Nothing in here changes the model; it runs the same wiring as the API (floodnet.api.state) and
+reports what the model produces in the footprint of each MCGM spot.
+
+Classes (working thresholds, same bands as config.SEVERITY_BANDS_CM; NOT cited guidance):
+    DETECTED  max modelled depth in footprint >= 15 cm
+    MARGINAL  5 cm <= max depth < 15 cm
+    MISSED    max depth < 5 cm
+
+Caveats that the report must carry (see research/mumbai/FLOOD_GROUND_TRUTH.md):
+  * The MCGM layer is a chronic/undated inventory (~2017), not a single-event flood map. Names containing
+    "(Delete)" / "(Tackled)" are flagged inactive by the data pipeline; only *active* spots are scored.
+  * DEPTH / STRETCH are MCGM free-text attributes with UNKNOWN units (DEPTH 1.5-3.0 is unlikely to be metres of
+    standing water on a road; it may be feet, a severity rank, or something else). They are reported verbatim.
+  * The Chitale (2006) report names roads/areas, not coordinates; that match is qualitative only.
+  * If the model floods most of the pilot at the scoring depth, agreement with the spots is uninformative — the
+    base rate is therefore reported alongside every score.
+
+CLI:
+    python -m floodnet.validation.flooding_spots --scenarios heavy july2005 --horizon-min 180
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+import numpy as np
+from pyproj import Transformer
+
+from .. import config
+from ..contracts import Grid, SimulationResult, DrainageNetwork, RoadGraph
+
+log = logging.getLogger("floodnet.validation")
+
+DETECT_CM = 15.0
+MARGINAL_CM = 5.0
+ONSET_THRESHOLDS_CM = (5.0, 15.0, 30.0)
+DEFAULT_RADIUS_M = 50.0
+
+# Named locations in the Chitale Committee report (2006) that fall in / next to the pilot bbox.
+# Substrings are matched case-insensitively against OSM road-segment names. Precision: named location only.
+CHITALE_TERMS = ("hindmata", "ambedkar", "lakhamsi", "napoo", "king", "tilak", "senapati bapat",
+                 "parel", "matunga", "dadar")
+
+_to_utm = Transformer.from_crs(config.CRS_GEO, config.CRS_COMPUTE, always_xy=True)
+
+
+# ----------------------------------------------------------------------------- geometry helpers
+def _lonlat_to_xy(lonlat) -> np.ndarray:
+    a = np.asarray(lonlat, dtype=float).reshape(-1, 2)
+    x, y = _to_utm.transform(a[:, 0], a[:, 1])
+    return np.column_stack([x, y])
+
+
+def _cell_centres(grid: Grid) -> tuple[np.ndarray, np.ndarray]:
+    xs = grid.x0 + (np.arange(grid.nx) + 0.5) * grid.res
+    ys = grid.y0 + (np.arange(grid.ny) + 0.5) * grid.res
+    return np.meshgrid(xs, ys)          # [ny, nx] each
+
+
+def _points_in_polygon(px: np.ndarray, py: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    """Even-odd ray casting; poly [K,2]. Vectorised over points."""
+    inside = np.zeros(px.shape, dtype=bool)
+    k = len(poly)
+    for a in range(k):
+        x1, y1 = poly[a]; x2, y2 = poly[(a + 1) % k]
+        cond = (y1 > py) != (y2 > py)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            xint = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+        inside ^= cond & (px < xint)
+    return inside
+
+
+def footprint_mask(grid: Grid, spot: dict, radius_m: float = DEFAULT_RADIUS_M) -> tuple[np.ndarray, str]:
+    """[ny,nx] bool of cells whose centres are in the spot footprint. Returns (mask, kind)."""
+    cx, cy = _cell_centres(grid)
+    poly = spot.get("polygon_lonlat") or spot.get("polygon")
+    if poly is not None and len(poly) >= 3:
+        p = _lonlat_to_xy(poly) if "polygon_lonlat" in spot else np.asarray(poly, dtype=float)
+        m = _points_in_polygon(cx, cy, p)
+        if m.any():
+            return m, "polygon"
+    c = spot.get("lonlat_centroid") or spot.get("centroid_lonlat")
+    if c is None:
+        raise ValueError(f"spot {spot.get('name')!r} has neither polygon nor centroid")
+    x, y = _lonlat_to_xy(c)[0]
+    m = np.hypot(cx - x, cy - y) <= radius_m
+    if not m.any():                                    # centroid outside grid or radius < half cell
+        j, i = grid.cell_of(np.array([x]), np.array([y]))
+        if grid.inside(j, i)[0]:
+            m[j[0], i[0]] = True
+    return m, f"radius_{radius_m:g}m"
+
+
+def _centroid_xy(spot: dict, grid: Grid, mask: np.ndarray) -> tuple[float, float]:
+    c = spot.get("lonlat_centroid") or spot.get("centroid_lonlat")
+    if c is not None:
+        return tuple(map(float, _lonlat_to_xy(c)[0]))
+    cx, cy = _cell_centres(grid)
+    return float(cx[mask].mean()), float(cy[mask].mean())
+
+
+def _seg_distance(x: float, y: float, xy: np.ndarray) -> float:
+    """Point-to-polyline distance (m)."""
+    if len(xy) == 1:
+        return float(np.hypot(xy[0, 0] - x, xy[0, 1] - y))
+    a = xy[:-1]; b = xy[1:]
+    ab = b - a; ap = np.array([x, y]) - a
+    den = np.einsum("ij,ij->i", ab, ab)
+    t = np.clip(np.where(den > 0, np.einsum("ij,ij->i", ap, ab) / np.where(den > 0, den, 1), 0), 0, 1)
+    proj = a + ab * t[:, None]
+    return float(np.min(np.hypot(proj[:, 0] - x, proj[:, 1] - y)))
+
+
+# ----------------------------------------------------------------------------- per-run summaries
+def depth_envelope(res: SimulationResult) -> np.ndarray:
+    """Per-cell max depth over all frames (m)."""
+    env = np.zeros_like(res.frames[0].depth, dtype=np.float32)
+    for f in res.frames:
+        np.maximum(env, f.depth, out=env)
+    return env
+
+
+def base_rate(res: SimulationResult, terrain, threshold_cm: float = DETECT_CM) -> dict:
+    """Fraction of (non-building) pilot cells whose max-over-time depth >= threshold; plus the peak-frame value."""
+    env = depth_envelope(res)
+    valid = ~terrain.building
+    thr = threshold_cm / 100.0
+    frac_env = float(np.mean(env[valid] >= thr))
+    per_frame = [float(np.mean(f.depth[valid] >= thr)) for f in res.frames]
+    k = int(np.argmax(per_frame))
+    return {"threshold_cm": threshold_cm, "n_cells": int(valid.sum()),
+            "frac_cells_ge_threshold_envelope": frac_env,
+            "frac_cells_ge_threshold_peak_frame": per_frame[k], "peak_frame_t_min": res.frames[k].t_s / 60.0,
+            "frac_cells_ge_5cm_envelope": float(np.mean(env[valid] >= 0.05)),
+            "envelope_percentiles_cm": {str(p): float(np.percentile(env[valid], p) * 100) for p in (50, 75, 90, 95, 99)}}
+
+
+def _onsets(res: SimulationResult, mask: np.ndarray) -> tuple[dict, float, float]:
+    """(onset_min per threshold, max_cm, t_of_max_min) for max-in-footprint depth over frames."""
+    series = np.array([float(f.depth[mask].max()) for f in res.frames])
+    t_min = np.array([f.t_s / 60.0 for f in res.frames])
+    on = {}
+    for thr in ONSET_THRESHOLDS_CM:
+        hit = np.nonzero(series >= thr / 100.0)[0]
+        on[f"{thr:g}cm"] = float(t_min[hit[0]]) if len(hit) else None
+    k = int(np.argmax(series))
+    return on, float(series[k] * 100), float(t_min[k])
+
+
+def _nearest_node(res: SimulationResult, net: DrainageNetwork, x: float, y: float) -> dict:
+    d = np.hypot(net.node_x - x, net.node_y - y)
+    k = int(np.argmin(d))
+    first = None; cause = ""; vol = 0.0
+    for f in res.frames:
+        vol += float(f.node_surcharge_m3[k])
+        if first is None and bool(f.node_surcharging[k]):
+            first = f.t_s / 60.0; cause = str(f.node_cause[k])
+    return {"id": str(net.node_id[k]), "dist_m": float(d[k]), "ground_m": float(net.node_ground[k]),
+            "surcharges": first is not None, "first_surcharge_min": first, "cause": cause,
+            "surcharge_volume_m3": vol, "is_outfall": bool(net.node_is_outfall[k])}
+
+
+def _nearest_road(res: SimulationResult, roads: Optional[RoadGraph], x: float, y: float) -> Optional[dict]:
+    if roads is None:
+        return None
+    best = None; bd = np.inf
+    for s in roads.segments:
+        xy = np.asarray(s.xy, dtype=float)
+        # cheap reject on bounding box before exact distance
+        if xy[:, 0].min() - 300 > x or xy[:, 0].max() + 300 < x or xy[:, 1].min() - 300 > y or xy[:, 1].max() + 300 < y:
+            continue
+        dd = _seg_distance(x, y, xy)
+        if dd < bd:
+            bd, best = dd, s
+    if best is None:
+        return None
+    dmax = max((float(f.street_depth_m.get(best.seg_id, 0.0)) for f in res.frames), default=0.0)
+    return {"seg_id": best.seg_id, "name": best.name or "(unnamed)", "highway": best.highway,
+            "dist_m": float(bd), "max_depth_cm": dmax * 100}
+
+
+def classify(max_cm: float) -> str:
+    if max_cm >= DETECT_CM:
+        return "DETECTED"
+    if max_cm >= MARGINAL_CM:
+        return "MARGINAL"
+    return "MISSED"
+
+
+def evaluate_spots(pilot: dict, res: SimulationResult, spots: Optional[list[dict]] = None,
+                   radius_m: float = DEFAULT_RADIUS_M) -> dict:
+    """Score every spot (active and inactive, flagged) against one simulation result."""
+    terrain = pilot["terrain"]; grid = terrain.grid; net = pilot["net"]; roads = pilot.get("roads")
+    spots = pilot.get("hotspots", []) if spots is None else spots
+    env = depth_envelope(res)
+    valid = ~terrain.building
+    env_valid_cm = np.sort(env[valid]) * 100
+    br = base_rate(res, terrain)
+    rows = []
+    for s in spots:
+        mask, kind = footprint_mask(grid, s, radius_m)
+        x, y = _centroid_xy(s, grid, mask)
+        on, max_cm, t_max = _onsets(res, mask)
+        pct = float(np.searchsorted(env_valid_cm, max_cm, side="left") / max(len(env_valid_cm), 1) * 100)
+        zc = terrain.z[mask]
+        # local relief: footprint min z relative to the median z within 150 m (negative = local low)
+        cx, cy = _cell_centres(grid)
+        ring = (np.hypot(cx - x, cy - y) <= 150.0) & valid
+        relief = float(zc.min() - np.median(terrain.z[ring])) if ring.any() else None
+        rows.append({
+            "name": s.get("name"), "active": bool(s.get("active", True)), "ward": s.get("ward"),
+            "location": s.get("location"), "affect_road": s.get("affect_road"),
+            "mcgm_depth_attr": s.get("depth_attr"), "mcgm_stretch_m": s.get("stretch_m"),
+            "footprint": kind, "footprint_cells": int(mask.sum()), "footprint_building_cells": int((mask & ~valid).sum()),
+            "footprint_z_min_m": float(zc.min()), "footprint_z_max_m": float(zc.max()), "local_relief_m": relief,
+            "max_depth_cm": max_cm, "t_of_max_min": t_max, "onset_min": on,
+            "cell_depth_percentile": pct, "class": classify(max_cm),
+            "nearest_node": _nearest_node(res, net, x, y),
+            "nearest_road": _nearest_road(res, roads, x, y),
+        })
+    act = [r for r in rows if r["active"]]
+    counts = {c: sum(1 for r in act if r["class"] == c) for c in ("DETECTED", "MARGINAL", "MISSED")}
+    return {"scenario": res.scenario.id, "scenario_name": res.scenario.name, "horizon_min": res.frames[-1].t_s / 60.0,
+            "blockage": res.blockage, "mass_balance_error_pct": res.mass_balance.error_pct,
+            "thresholds_cm": {"detected": DETECT_CM, "marginal": MARGINAL_CM},
+            "base_rate": br, "active_counts": counts, "n_active": len(act), "n_total": len(rows),
+            "uninformative": br["frac_cells_ge_threshold_envelope"] >= 0.5,
+            "spots": rows}
+
+
+# ----------------------------------------------------------------------------- Chitale named roads
+def chitale_match(pilot: dict, res: SimulationResult, terms=CHITALE_TERMS) -> list[dict]:
+    roads = pilot.get("roads")
+    out = []
+    if roads is None:
+        return out
+    seg_max = {}
+    for f in res.frames:
+        for k, v in f.street_depth_m.items():
+            if v > seg_max.get(k, 0.0):
+                seg_max[k] = float(v)
+    for term in terms:
+        segs = [s for s in roads.segments if s.name and term in s.name.lower()]
+        names = sorted({s.name for s in segs})
+        if not segs:
+            out.append({"term": term, "n_segments": 0, "names": [], "max_depth_cm": None, "class": "NO_ROAD_MATCH"})
+            continue
+        depths = [seg_max.get(s.seg_id, 0.0) for s in segs]
+        mx = max(depths) * 100
+        n_ge15 = sum(1 for d in depths if d >= DETECT_CM / 100)
+        out.append({"term": term, "n_segments": len(segs), "names": names[:12], "max_depth_cm": mx,
+                    "median_depth_cm": float(np.median(depths)) * 100,
+                    "frac_segments_ge_15cm": n_ge15 / len(segs), "class": classify(mx)})
+    return out
+
+
+# ----------------------------------------------------------------------------- run wiring (copied from api.state)
+def run_pilot_scenario(pilot: dict, scenario_id: str, horizon_min: int = 180, blockage: Optional[dict] = None):
+    from ..simulation.engine import run_simulation
+    from ..terrain.runoff import runoff_fn
+    from ..terrain.surface import StorageCellSurface
+    from ..drainage.hydraulics import GraphDrainage
+    from ..streets.aggregate import make_street_fn
+    sc = pilot["scenarios"]
+    scen = sc[scenario_id] if isinstance(sc, dict) else next(s for s in sc if s.id == scenario_id)
+    terrain = pilot["terrain"]; net = pilot["net"]
+    street_fn = make_street_fn(pilot["roads"], terrain.grid) if pilot.get("roads") is not None else None
+    return run_simulation(terrain, net, scen, StorageCellSurface(terrain), GraphDrainage(net), runoff_fn,
+                          street_fn=street_fn, blockage=blockage or {"mode": "none"},
+                          horizon_s=int(horizon_min) * 60, frame_dt_s=config.FRAME_DT_S)
+
+
+# ----------------------------------------------------------------------------- report
+def _fmt(v, nd=1):
+    return "-" if v is None else f"{v:.{nd}f}"
+
+
+def render_markdown(report: dict) -> str:
+    L = ["# Flooding Spots validation (MCGM layer 344) — pilot " + config.PILOT_NAME, "",
+         f"Generated {report['generated']} on commit {report.get('commit', '?')}; horizon {report['horizon_min']} min; "
+         "blockage none. Measurement only — the model was not tuned for this check.", "",
+         "## What this is and is not", "",
+         "* MCGM \"Flooding Spots\" is a chronic, **undated** inventory (~2017); it is not a flood map for any storm. "
+         "Only spots not flagged `(Delete)`/`(Tackled)` are scored (**active**); inactive ones are listed for reference.",
+         "* Footprint = MCGM polygon (cells whose centre falls inside) or, if absent, a 50 m radius around the centroid. "
+         "The polygons in this snapshot are ~100-500 m circles, so 'max depth in footprint' is a generous test.",
+         f"* Class: DETECTED >= {DETECT_CM:g} cm, MARGINAL {MARGINAL_CM:g}-{DETECT_CM:g} cm, MISSED < {MARGINAL_CM:g} cm "
+         "(max modelled surface depth in footprint over the run). Working thresholds, not cited guidance.",
+         "* MCGM `DEPTH` / `STRETCH` attributes are free text of **unknown units**; they are reproduced verbatim, not compared.",
+         "* Base rate: if a large share of all pilot cells exceeds the detection depth, agreement is **uninformative** "
+         "(anything would be 'detected'). The percentile column places each spot in the distribution of per-cell max depth.",
+         ""]
+    for run in report["runs"]:
+        br = run["base_rate"]; c = run["active_counts"]
+        L += [f"## Scenario `{run['scenario']}` — {run['scenario_name']}", "",
+              f"Active spots: **DETECTED {c['DETECTED']} / MARGINAL {c['MARGINAL']} / MISSED {c['MISSED']}** of {run['n_active']}. "
+              f"Mass-balance error {run['mass_balance_error_pct']:.2f} %.", "",
+              f"Base rate: {br['frac_cells_ge_threshold_envelope']*100:.1f} % of {br['n_cells']} non-building cells reach "
+              f">= {br['threshold_cm']:g} cm at some point (peak single frame {br['frac_cells_ge_threshold_peak_frame']*100:.1f} % "
+              f"at t = {br['peak_frame_t_min']:.0f} min); {br['frac_cells_ge_5cm_envelope']*100:.1f} % reach >= 5 cm. "
+              f"Per-cell max-depth percentiles (cm): " + ", ".join(f"p{k}={v:.1f}" for k, v in br["envelope_percentiles_cm"].items()) + ".",
+              ("**Agreement is uninformative for this scenario: the model floods most of the pilot at the scoring depth.**"
+               if run["uninformative"] else
+               "The scoring depth is exceeded in a minority of cells, so DETECTED is informative here."), "",
+              "| Spot | Active | Footprint (cells) | Max depth cm (t) | Onset 5/15/30 cm (min) | Cell pctl | Class | "
+              "Nearest node (dist m; surcharge) | Nearest road (dist m; max cm) | MCGM DEPTH/STRETCH (units?) | z min / relief m |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
+        for s in run["spots"]:
+            n = s["nearest_node"]; r = s["nearest_road"] or {}
+            on = s["onset_min"]
+            surch = (f"yes @{n['first_surcharge_min']:.0f} min, {n['cause'] or '?'}" if n["surcharges"] else "no")
+            L.append(f"| {s['name'].strip()} | {'yes' if s['active'] else 'no'} | {s['footprint']} ({s['footprint_cells']}) | "
+                     f"{s['max_depth_cm']:.1f} ({s['t_of_max_min']:.0f}) | {_fmt(on['5cm'],0)}/{_fmt(on['15cm'],0)}/{_fmt(on['30cm'],0)} | "
+                     f"{s['cell_depth_percentile']:.0f} | **{s['class']}** | {n['id']} ({n['dist_m']:.0f}; {surch}) | "
+                     f"{r.get('name','-')} ({_fmt(r.get('dist_m'),0)}; {_fmt(r.get('max_depth_cm'))}) | "
+                     f"{s['mcgm_depth_attr']} / {s['mcgm_stretch_m']} | {s['footprint_z_min_m']:.2f} / {_fmt(s['local_relief_m'],2)} |")
+        L.append("")
+        misses = [s for s in run["spots"] if s["active"] and s["class"] != "DETECTED"]
+        if misses:
+            L += ["### Diagnosis of active spots not DETECTED", ""]
+            for s in misses:
+                L += [f"**{s['name'].strip()}** ({s['class']}, {s['max_depth_cm']:.1f} cm): " + diagnose(s), ""]
+    ch = report.get("chitale") or {}
+    if ch:
+        L += [f"## Chitale Committee (2006) named locations — scenario `{ch['scenario']}`", "",
+              "Qualitative, named-location precision only: the report names roads/areas that were submerged on 26-27 July 2005; "
+              "it gives no coordinates, depths or times for them. Substrings are matched against OSM segment names inside the pilot.", "",
+              "| Term | Segments | Example names | Max depth cm | Median cm | Share of segments >= 15 cm | Class |", "|---|---|---|---|---|---|---|"]
+        for m in ch["matches"]:
+            L.append(f"| {m['term']} | {m['n_segments']} | {'; '.join(m['names'][:4])} | {_fmt(m['max_depth_cm'])} | "
+                     f"{_fmt(m.get('median_depth_cm'))} | {_fmt((m.get('frac_segments_ge_15cm') or 0)*100,0)} % | {m['class']} |")
+        L += ["", f"Chitale base rate under `{ch['scenario']}`: {ch['frac_all_segments_ge_15cm']*100:.1f} % of all "
+              f"{ch['n_segments_total']} named+unnamed road segments in the pilot reach >= 15 cm; a term scoring DETECTED is only "
+              "meaningful relative to that share.", ""]
+    L += ["## Files", "", "* `docs/validation/flooding_spots.json` — machine-readable version of everything above.",
+          "* `backend/floodnet/validation/flooding_spots.py` — the code (CLI: `python -m floodnet.validation.flooding_spots`).", ""]
+    return "\n".join(L)
+
+
+def diagnose(s: dict) -> str:
+    """One paragraph, evidence from the row only. No fixes."""
+    n = s["nearest_node"]; r = s["nearest_road"] or {}
+    parts = []
+    if n["dist_m"] > 100:
+        parts.append(f"nearest drainage node is {n['dist_m']:.0f} m away, so the spot is effectively outside the modelled network's "
+                     "inlet reach (water there can only pond by terrain, not by surcharge)")
+    else:
+        parts.append(f"a drainage node ({n['id']}) sits {n['dist_m']:.0f} m away")
+        if n["surcharges"]:
+            parts.append(f"it does surcharge (from {n['first_surcharge_min']:.0f} min, cause {n['cause'] or 'unknown'}, "
+                         f"{n['surcharge_volume_m3']:.0f} m3 returned to surface) but the returned water does not stay in the footprint")
+        else:
+            parts.append("it never surcharges in this run, i.e. the model thinks the local pipes cope")
+    if s["local_relief_m"] is not None:
+        if s["local_relief_m"] > 0.0:
+            parts.append(f"the footprint's lowest cell is {s['local_relief_m']:+.2f} m relative to the 150 m-neighbourhood median, "
+                         "i.e. the DTM has no local low here — runoff drains away rather than ponding")
+        elif s["local_relief_m"] > -0.3:
+            parts.append(f"local relief is only {s['local_relief_m']:+.2f} m, a very shallow depression at 10 m resolution")
+        else:
+            parts.append(f"the footprint does contain a local low ({s['local_relief_m']:+.2f} m vs neighbourhood) yet stays dry, "
+                         "which points at runoff routing / inlet capture rather than terrain")
+    if s["footprint_building_cells"] and s["footprint_building_cells"] > 0.5 * s["footprint_cells"]:
+        parts.append(f"{s['footprint_building_cells']} of {s['footprint_cells']} footprint cells are building (no-flow) cells")
+    name = (s["name"] or "").lower(); loc = (s["location"] or "").lower()
+    if any(k in name or k in loc for k in ("station", "subway", "yard", "railway")):
+        parts.append("the location is at/under a railway station or subway, a feature (underpass, track-side low) that a 10 m "
+                     "DTM interpolated from 20 cm contours does not resolve")
+    if r:
+        parts.append(f"the nearest OSM segment ({r['name']}, {r['dist_m']:.0f} m) reaches at most {r['max_depth_cm']:.1f} cm")
+    return "; ".join(parts) + "."
+
+
+def build_report(pilot: dict, scenarios=("heavy", "july2005"), horizon_min: int = 180, chitale_scenario: str = "july2005",
+                 progress=print) -> dict:
+    runs = []; chit = None
+    for sid in scenarios:
+        t0 = time.time()
+        res = run_pilot_scenario(pilot, sid, horizon_min)
+        progress(f"[spots] {sid}: engine {res.runtime_s:.1f}s wall {time.time()-t0:.1f}s, mb err {res.mass_balance.error_pct:.2f}%")
+        runs.append(evaluate_spots(pilot, res))
+        if sid == chitale_scenario:
+            seg_max = {}
+            for f in res.frames:
+                for k, v in f.street_depth_m.items():
+                    seg_max[k] = max(seg_max.get(k, 0.0), float(v))
+            allv = list(seg_max.values())
+            chit = {"scenario": sid, "matches": chitale_match(pilot, res),
+                    "n_segments_total": len(allv),
+                    "frac_all_segments_ge_15cm": float(np.mean([v >= DETECT_CM / 100 for v in allv])) if allv else 0.0}
+    commit = None
+    try:
+        import subprocess
+        commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=config.REPO_DIR, text=True).strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"generated": time.strftime("%Y-%m-%d %H:%M"), "commit": commit, "horizon_min": horizon_min,
+            "pilot": config.PILOT_NAME, "runs": runs, "chitale": chit}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--scenarios", nargs="+", default=["heavy", "july2005"])
+    ap.add_argument("--horizon-min", type=int, default=180)
+    ap.add_argument("--out-json", default=str(config.REPO_DIR / "docs" / "validation" / "flooding_spots.json"))
+    ap.add_argument("--out-md", default=str(config.REPO_DIR / "docs" / "validation" / "FLOODING_SPOTS.md"))
+    a = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    from ..data.load import load_pilot
+    pilot = load_pilot()
+    rep = build_report(pilot, a.scenarios, a.horizon_min)
+    Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
+    with open(a.out_json, "w", encoding="utf-8") as fh:
+        json.dump(rep, fh, indent=1)
+    with open(a.out_md, "w", encoding="utf-8") as fh:
+        fh.write(render_markdown(rep))
+    for run in rep["runs"]:
+        print(f"{run['scenario']}: active {run['active_counts']} base-rate>=15cm {run['base_rate']['frac_cells_ge_threshold_envelope']*100:.1f}%")
+    print(f"wrote {a.out_md} and {a.out_json}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
