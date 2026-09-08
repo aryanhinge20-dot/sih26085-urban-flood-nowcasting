@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -78,7 +79,15 @@ def load_scenarios(d: Path = DATA_PROCESSED) -> dict[str, RainfallScenario]:
 
 
 def load_pilot(d: Path = DATA_PROCESSED) -> dict:
-    d = Path(d)
+    """Process-wide cached by resolved directory: parsing the real network/terrain/roads JSON is the
+    dominant cost of a pilot load (tens of thousands of manhole/conduit records), and nothing in this
+    codebase mutates the returned dataclasses in place (blockage etc. all go through dataclasses.replace),
+    so repeat calls -- from tests, validation scripts, or API state -- can safely share one parse."""
+    return _load_pilot_cached(Path(d).resolve())
+
+
+@lru_cache(maxsize=4)
+def _load_pilot_cached(d: Path) -> dict:
     _check(d)
     return {"terrain": load_terrain(d), "net": load_network(d), "roads": load_roads(d),
             "hotspots": load_hotspots(d), "scenarios": load_scenarios(d)}
