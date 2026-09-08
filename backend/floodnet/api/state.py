@@ -280,22 +280,8 @@ def _canon_blockage(spec: Optional[dict]) -> str:
     return json.dumps(spec or {"mode": "none"}, sort_keys=True, default=str)
 
 
-@lru_cache(maxsize=8)
-def _run_scenario_cached(scenario_id: str, blockage_json: str, horizon_min: int) -> SimulationResult:
-    """The actual physics run, memoized by the fully-canonicalised request. A simulation is deterministic
-    given (scenario_id, blockage spec, horizon) -- the engine has no randomness -- so an identical repeat
-    request (the frontend re-opening a scenario, /api/compare's 'normal' side reused across several
-    'blocked' variants, a client retry) is pure recomputation otherwise. `run_scenario` below still mints a
-    fresh run_id and a fresh `_runs` entry on every call, so the REST contract (each POST /api/simulate
-    returns its own run_id) is unchanged -- only the expensive physics loop is shared. Bounded to 8 entries
-    (each holds ~37 frames of full-grid state) since this is meant to catch the handful of requests a demo
-    session actually repeats, not to cache unboundedly."""
+def _run_physics(scen, blockage: dict, horizon_min: int, p: dict) -> SimulationResult:
     from ..simulation.engine import run_simulation
-    p = get_pilot()
-    scen = p["scenarios"].get(scenario_id)
-    if scen is None:
-        raise KeyError(scenario_id)
-    blockage = json.loads(blockage_json)
     net = apply_blockage(p["net"], blockage)
     terrain = p["terrain"]
     with sim_lock:
@@ -310,10 +296,44 @@ def _run_scenario_cached(scenario_id: str, blockage_json: str, horizon_min: int)
     return res
 
 
+@lru_cache(maxsize=8)
+def _run_scenario_cached(scenario_id: str, blockage_json: str, horizon_min: int) -> SimulationResult:
+    """The actual physics run for a STATIC pilot scenario (moderate/heavy/cloudburst/july2005), memoized by
+    the fully-canonicalised request. A simulation is deterministic given (scenario_id, blockage spec,
+    horizon) -- the engine has no randomness -- so an identical repeat request (the frontend re-opening a
+    scenario, /api/compare's 'normal' side reused across several 'blocked' variants, a client retry) is pure
+    recomputation otherwise. `run_scenario` below still mints a fresh run_id and a fresh `_runs` entry on
+    every call, so the REST contract (each POST /api/simulate returns its own run_id) is unchanged -- only
+    the expensive physics loop is shared. Bounded to 8 entries (each holds ~37 frames of full-grid state)
+    since this is meant to catch the handful of requests a demo session actually repeats, not to cache
+    unboundedly. Deliberately NOT used for scenario_id='live' -- see _run_live_scenario: an lru_cache here
+    would freeze a live run's rainfall forever at whatever it was on the first request, defeating the point
+    of "live"; IMDObservationProvider has its own short-TTL cache for that instead."""
+    p = get_pilot()
+    scen = p["scenarios"].get(scenario_id)
+    if scen is None:
+        raise KeyError(scenario_id)
+    return _run_physics(scen, json.loads(blockage_json), horizon_min, p)
+
+
+def _run_live_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
+    """scenario_id='live': fetch the current IMD-observed rainfall (via the module-level, TTL-cached
+    IMDObservationProvider) and run the same physics engine on it. Raises ProviderUnavailable (propagated to
+    the caller as HTTP 503, see api/main.py) rather than silently substituting a scenario/replay while still
+    labelled live -- see docs/LIVE_RAINFALL_AUDIT.md and the FAILURE FALLBACK design it documents."""
+    from ..rainfall.provider import list_providers, LIVE_ID
+    scen, _meta = list_providers()[LIVE_ID].get(LIVE_ID)
+    return _run_physics(scen, blockage, horizon_min, get_pilot())
+
+
 def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
     """Blocking; call via run_in_threadpool."""
-    cached = _run_scenario_cached(scenario_id, _canon_blockage(blockage), int(horizon_min))
-    res = copy.copy(cached)   # fresh run_id/cache-slot per call; frames/mass_balance/provenance shared read-only
+    from ..rainfall.provider import LIVE_ID
+    if scenario_id == LIVE_ID:
+        res = _run_live_scenario(blockage or {"mode": "none"}, int(horizon_min))
+    else:
+        cached = _run_scenario_cached(scenario_id, _canon_blockage(blockage), int(horizon_min))
+        res = copy.copy(cached)  # fresh run_id/cache-slot per call; frames/mass_balance/provenance shared read-only
     res.run_id = uuid.uuid4().hex[:10]
     put_run(res)
     return res

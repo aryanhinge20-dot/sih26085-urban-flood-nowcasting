@@ -6,8 +6,11 @@ import pytest
 from floodnet.contracts import RainfallScenario
 from floodnet.provenance import Tag
 from floodnet.rainfall.provider import (
+    LIVE_ID,
     ExternalNowcastProvider,
     HistoricalReplayProvider,
+    IMDObservationProvider,
+    ProviderUnavailable,
     RainfallSourceMeta,
     ScenarioProvider,
     get_source_meta,
@@ -107,9 +110,137 @@ def test_get_source_meta():
 def test_provider_status_never_reports_external_nowcast_active():
     """No live nowcast source is connected in this prototype -- /api/status must never claim otherwise."""
     status = provider_status()
-    assert len(status) >= 4
+    assert len(status) >= 5   # moderate, heavy, cloudburst, july2005, live
     for entry in status:
-        assert entry["source_type"] in ("scenario", "historical_replay")
+        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation")
         assert entry["source_type"] != "external_nowcast"
     ids = {e["id"] for e in status}
-    assert {"moderate", "heavy", "cloudburst", "july2005"} <= ids
+    assert {"moderate", "heavy", "cloudburst", "july2005", "live"} <= ids
+
+
+# ---------------------------------------------------------------------- IMDObservationProvider (live)
+# Real access requirements verified in docs/LIVE_RAINFALL_AUDIT.md: api.imd.gov.in requires an API key
+# (empirically confirmed: an unauthenticated GET returns HTTP 401 {"error":"API key missing"}) obtained
+# through a manual, non-self-service registration process. These tests never make a real network call --
+# httpx.Client is monkeypatched with a fake response built from IMD's own documented field names, so they
+# are fully deterministic and safe to run in normal CI with no credentials and no network access.
+
+class _FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """Stands in for `httpx.Client(...)` used as a context manager; records the call it received."""
+    last_call = {}
+
+    def __init__(self, headers=None, timeout=None):
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get(self, url, params=None):
+        _FakeClient.last_call = {"url": url, "params": params, "headers": self.headers}
+        return _FakeClient.response
+
+
+def _patch_httpx_client(monkeypatch, response):
+    import httpx
+    _FakeClient.response = response
+    monkeypatch.setattr(httpx, "Client", _FakeClient)
+
+
+def _imd_sample_row(rainfall_mm="42.5", station="Mumbai-Santacruz"):
+    # Field names exactly as documented in api.imd.gov.in's api_reference.html for current_wx.
+    return {"Station Id": "43003", "Station": station, "Date of Observation": "2026-09-09",
+            "Time of Observation": "05:30:00", "M.S.L.P": "1008.2", "Wind Direction": "220",
+            "Wind Speed": "12", "Temperature": "27.4", "Weather Code": "61", "Nebulosity": "7",
+            "Humidity": "88", "Last 24 hrs Rainfall": rainfall_mm}
+
+
+def test_imd_provider_unavailable_when_not_configured(monkeypatch):
+    monkeypatch.delenv("IMD_API_KEY", raising=False)
+    prov = IMDObservationProvider(api_key=None)
+    prov._api_key = None
+    with pytest.raises(ProviderUnavailable, match="not configured"):
+        prov.get()
+    assert prov.is_configured() is False
+
+
+def test_imd_provider_parses_real_documented_field_shape(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row("42.5")]))
+    prov = IMDObservationProvider(station_id="43003", api_key="test-key-123")
+    scen, meta = prov.get()
+    assert isinstance(scen, RainfallScenario) and scen.id == LIVE_ID
+    # persistence normalisation: 42.5 mm / 24 h, held flat over every 5-min step
+    expected_mm_h = 42.5 / 24.0
+    assert scen.intensity_mm_h == pytest.approx([expected_mm_h] * len(scen.intensity_mm_h))
+    assert scen.provenance.tag == Tag.ESTIMATED     # real observation, but a stated assumption shapes the series
+    assert "persistence" in scen.provenance.note.lower()
+    assert "42.5" in scen.provenance.note
+    assert meta.source_type == "live_observation"
+    assert meta.data_mode == "ESTIMATED"
+    assert "Mumbai-Santacruz" in meta.source_name
+
+
+def test_imd_provider_sends_the_configured_key(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row()]))
+    IMDObservationProvider(station_id="43003", api_key="my-secret-key").get()
+    call = _FakeClient.last_call
+    assert call["params"]["id"] == "43003"
+    assert call["params"]["apikey"] == "my-secret-key"
+    assert call["headers"]["Authorization"] == "Bearer my-secret-key"
+
+
+def test_imd_provider_raises_unavailable_on_http_error(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(401, {"error": "API key missing"}))
+    prov = IMDObservationProvider(api_key="wrong-or-unactivated-key")
+    with pytest.raises(ProviderUnavailable):
+        prov.get()
+
+
+def test_imd_provider_raises_unavailable_rather_than_guess_missing_rainfall_field(monkeypatch):
+    row = _imd_sample_row(); del row["Last 24 hrs Rainfall"]
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [row]))
+    prov = IMDObservationProvider(api_key="test-key")
+    with pytest.raises(ProviderUnavailable, match="Last 24 hrs Rainfall"):
+        prov.get()
+
+
+def test_imd_provider_wrong_scenario_id_raises_keyerror():
+    with pytest.raises(KeyError):
+        IMDObservationProvider(api_key="k").get("heavy")
+
+
+def test_imd_provider_caches_within_ttl(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row("10.0")]))
+    prov = IMDObservationProvider(api_key="k")
+    prov.get()
+    calls_after_first = len(_FakeClient.last_call)  # just a presence check
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row("999.0")]))  # would change the result if re-fetched
+    scen2, _ = prov.get()
+    assert scen2.intensity_mm_h[0] == pytest.approx(10.0 / 24.0), "cached value must be reused within TTL, not re-fetched"
+    prov.clear_cache()
+    scen3, _ = prov.get()
+    assert scen3.intensity_mm_h[0] == pytest.approx(999.0 / 24.0), "clear_cache() must force a fresh fetch"
+
+
+def test_imd_provider_never_used_for_external_nowcast_id():
+    """ExternalNowcastProvider stays a separate, still-inert class -- IMDObservationProvider only ever
+    serves LIVE_ID, and does not become the 'external_nowcast' entry."""
+    providers = list_providers()
+    assert providers[LIVE_ID] is not providers["external_nowcast"]
+    assert isinstance(providers["external_nowcast"], ExternalNowcastProvider)
+    assert isinstance(providers[LIVE_ID], IMDObservationProvider)

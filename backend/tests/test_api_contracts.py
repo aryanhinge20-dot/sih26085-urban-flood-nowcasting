@@ -47,7 +47,7 @@ def test_status():
     assert len(providers) >= 1
     for entry in providers:
         assert {"id", "source_type", "data_mode"} <= set(entry)
-        assert entry["source_type"] in ("scenario", "historical_replay")  # never "external_nowcast" (inert)
+        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation")  # never "external_nowcast" (inert)
 
 
 def test_provenance():
@@ -235,3 +235,62 @@ def test_unknown_run_id_series_404():
     r = client.get("/api/simulation/does-not-exist/series")
     assert r.status_code == 404
     assert "Traceback" not in r.text
+
+
+# ---------------------------------------------------------------------- scenario_id="live" (IMD)
+# No real network call in these -- IMDObservationProvider.get is monkeypatched. Real-credential behaviour is
+# covered separately by the opt-in tests/test_imd_live_smoke.py (skipped without a real IMD_API_KEY).
+
+def test_simulate_live_without_credentials_is_503_not_fake_data(monkeypatch):
+    monkeypatch.delenv("IMD_API_KEY", raising=False)
+    from floodnet.rainfall.provider import _imd_live_provider
+    _imd_live_provider.clear_cache()
+    r = client.post("/api/simulate", json={"scenario_id": "live", "blockage": {"mode": "none"}, "horizon_min": 60})
+    assert r.status_code == 503
+    assert "Traceback" not in r.text
+    assert "IMD_API_KEY" in r.json().get("detail", "")
+
+
+def test_simulate_live_with_mocked_provider_runs_the_real_engine(monkeypatch):
+    if not REAL_PILOT_BUILT:
+        pytest.skip("real pilot data not built")
+    import numpy as np
+    from floodnet.config import HORIZON_S, RAIN_DT_S
+    from floodnet.contracts import RainfallScenario
+    from floodnet.provenance import Provenance, Tag
+    from floodnet.rainfall.provider import IMDObservationProvider, RainfallSourceMeta
+
+    t_s = np.arange(0, HORIZON_S + 1, RAIN_DT_S, dtype=float)
+    fake_scen = RainfallScenario(id="live", name="Live (IMD-observed, TEST)", t_s=t_s,
+                                 intensity_mm_h=np.full_like(t_s, 3.0),
+                                 provenance=Provenance(Tag.ESTIMATED, "test", "72.0 mm/24h persistence, mocked"))
+    fake_meta = RainfallSourceMeta(source_type="live_observation", source_name="IMD TEST", timestamp="2026-09-09T00:00:00+00:00",
+                                   forecast_horizon_min=HORIZON_S // 60, resolution_min=1440, data_mode="ESTIMATED",
+                                   provenance=fake_scen.provenance)
+    monkeypatch.setattr(IMDObservationProvider, "get", lambda self, scenario_id=None, **kw: (fake_scen, fake_meta))
+
+    r = client.post("/api/simulate", json={"scenario_id": "live", "blockage": {"mode": "none"}, "horizon_min": 30})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["scenario_id"] == "live"
+    assert body["provenance"]["rainfall"]["tag"] == "ESTIMATED"
+    assert "persistence" in body["provenance"]["rainfall"]["note"] or "mocked" in body["provenance"]["rainfall"]["note"]
+    # a real run happened: frames + a genuinely closing mass balance, not a stub response
+    assert body["n_frames"] >= 2
+    assert abs(body["mass_balance"]["error_pct"]) < 0.1
+
+    r2 = client.get(f"/api/simulate/{body['run_id']}")
+    assert r2.status_code == 200 and r2.json()["run_id"] == body["run_id"]
+
+
+def test_status_reports_live_provider_configured_state(monkeypatch):
+    monkeypatch.delenv("IMD_API_KEY", raising=False)
+    from floodnet.rainfall.provider import _imd_live_provider
+    _imd_live_provider.clear_cache()
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    providers = {p["id"]: p for p in r.json()["rainfall_providers"]}
+    assert "live" in providers
+    assert providers["live"]["available"] is False
+    assert "IMD_API_KEY" in providers["live"].get("reason", "")
+    assert "external_nowcast" not in providers

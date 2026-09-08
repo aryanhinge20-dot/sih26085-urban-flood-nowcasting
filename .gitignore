@@ -9,6 +9,8 @@ node_modules/
 frontend-react/dist/
 # large raw caches (keep the MCGM network snapshot; ignore bulky fetches)
 data/raw/osm/*.pbf
+# secrets -- never commit real credentials; see .env.example
+.env
 # os
 .DS_Store
 Thumbs.db

@@ -1,10 +1,30 @@
 """Single source of truth for pilot geometry, CRS, time and paths. Do not duplicate these elsewhere."""
 from __future__ import annotations
+import os
 from pathlib import Path
 
 # --- Paths --------------------------------------------------------------------
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_DIR = BACKEND_DIR.parent
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal, dependency-free `.env` loader (KEY=VALUE per line, '#' comments, blank lines skipped).
+    Never overrides a variable already set in the real environment. Used for IMD_API_KEY etc. -- see
+    `.env.example`. No new package added; pyproject.toml's dependency list is deliberately fixed."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = val.strip().strip('"').strip("'")
+
+
+_load_dotenv(REPO_DIR / ".env")
 DATA_RAW = REPO_DIR / "data" / "raw"
 DATA_PROCESSED = REPO_DIR / "data" / "processed" / "pilot"
 MCGM_RAW = DATA_RAW / "mcgm_gis"

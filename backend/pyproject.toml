@@ -28,3 +28,6 @@ include = ["floodnet*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "live: opt-in tests that call a real external API (e.g. IMD); skipped unless real credentials are configured",
+]
