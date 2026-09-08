@@ -23,6 +23,16 @@
   gap: 8px;
   margin-top: 14px;
 }
+.compareNote {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--synthetic);
+  font-weight: 600;
+}
+.compareNote b {
+  color: var(--sev-severe);
+}
 .runInfo {
   margin-top: 12px;
   padding: 10px 11px;

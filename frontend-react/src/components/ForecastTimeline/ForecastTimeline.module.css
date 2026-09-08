@@ -41,6 +41,11 @@
   letter-spacing: 0.5px;
   font-weight: 700;
 }
+.metricLegend {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
 .topRow b {
   color: var(--text-dim);
   text-transform: none;

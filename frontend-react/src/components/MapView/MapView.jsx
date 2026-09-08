@@ -57,8 +57,11 @@ export default function MapView() {
 
   // ---------------------------------------------------------------- init (once)
   useEffect(() => {
-    const map = L.map(elRef.current, { zoomControl: true, preferCanvas: true }).setView(PILOT_CENTER, 15)
-    map.zoomControl.setPosition('bottomright')
+    // No corner is free for Leaflet's default zoom control: header/left-panel/right-panel/timeline hug all
+    // four edges (see App.module.css), and Leaflet's own control container is z-index 1000 (leaflet.css),
+    // above every panel here (800-900) -- a corner control would visibly float on top of the timeline or
+    // header. Scroll-to-zoom and drag-to-pan remain fully enabled without it.
+    const map = L.map(elRef.current, { zoomControl: false, preferCanvas: true }).setView(PILOT_CENTER, 15)
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors',

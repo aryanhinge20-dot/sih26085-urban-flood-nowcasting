@@ -84,6 +84,12 @@ export default function ScenarioPanel() {
 
       {run && summary && (
         <div className={styles.runInfo}>
+          {run.__isCompareBlocked && (
+            <div className={styles.compareNote}>
+              Comparing normal vs blocked — map, streets and KPIs below show the <b>BLOCKED</b> run; the normal run
+              is the cyan line on the timeline chart, blocked is red.
+            </div>
+          )}
           run <b>{shortId(run.run_id)}</b> &middot; {fmt(run.runtime_s, 1)} s &middot; mass-balance error <b>{fmt(mb?.error_pct, 4)}%</b>
           <br />
           peak depth <b>{fmt(summary.max_depth_cm, 0)} cm</b> &middot; surcharging nodes <b>{summary.peak_surcharging_nodes ?? '–'}</b>

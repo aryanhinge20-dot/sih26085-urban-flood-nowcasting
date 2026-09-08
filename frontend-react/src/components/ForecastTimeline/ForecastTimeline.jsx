@@ -31,11 +31,19 @@ export default function ForecastTimeline() {
     return { bars, imax, total: sc.total_mm }
   }, [currentScenario, tMin, tMax])
 
+  // Compare mode plots flooded-segment count, not max depth: the pilot's extreme depth is dominated by a
+  // handful of geometry-limited cells that saturate almost identically whether drains are blocked or not
+  // (confirmed against the live backend: normal vs 50%-blocked max depth differs by ~0.01 cm at t=180 on
+  // the `heavy` scenario) -- plotting max depth here would look like nothing happened. Flooded-segment
+  // count is the metric that actually, visibly separates the two runs (see docs/VALIDATION.md /
+  // scripts/demo_check.py, which uses the same metric for its blocked-vs-normal check).
+  const metricLabel = compareResult ? 'flooded segments' : 'max depth (cm)'
   const depthLines = useMemo(() => {
     const lines = []
     if (compareResult) {
-      lines.push({ t: compareResult.t_min || compareResult.frames_t_min, y: compareResult.normal.max_depth_cm, color: '#00d4ff', label: 'normal' })
-      lines.push({ t: compareResult.t_min || compareResult.frames_t_min, y: compareResult.blocked.max_depth_cm, color: '#ff3366', label: 'blocked' })
+      const t = compareResult.t_min || compareResult.frames_t_min
+      lines.push({ t, y: compareResult.normal.flooded_segments, color: '#00d4ff', label: 'normal' })
+      lines.push({ t, y: compareResult.blocked.flooded_segments, color: '#ff3366', label: 'blocked' })
     } else if (series) {
       lines.push({ t: series.t_min, y: series.max_depth_cm, color: '#00d4ff', label: 'max depth' })
     }
@@ -61,7 +69,21 @@ export default function ForecastTimeline() {
 
       <div className={styles.body}>
         <div className={styles.topRow}>
-          <span>0&ndash;180 min forecast</span>
+          <span>
+            0&ndash;180 min forecast
+            {run && (
+              <span className={styles.metricLegend}>
+                {' '}
+                &middot; {metricLabel}
+                {compareResult && (
+                  <>
+                    {' '}
+                    (<span style={{ color: '#00d4ff' }}>&#9679; normal</span> vs <span style={{ color: '#ff3366' }}>&#9679; blocked</span>)
+                  </>
+                )}
+              </span>
+            )}
+          </span>
           {rainPath.total != null && <b>rain total {Math.round(rainPath.total)} mm &middot; peak {Math.round(rainPath.imax)} mm/h</b>}
         </div>
         <div className={styles.chartWrap}>

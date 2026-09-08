@@ -67,8 +67,11 @@
 }
 
 .legend {
+  /* left panel is 250-328px wide (see App.module.css) starting at left:14px -- 360px clears it at every
+     breakpoint without needing a matching media query, so the legend floats on open map, never under the
+     control panel. */
   position: absolute;
-  left: 14px;
+  left: 360px;
   bottom: 148px;
   z-index: 900;
   padding: 10px 13px;
