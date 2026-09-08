@@ -195,6 +195,25 @@ def test_imd_provider_parses_real_documented_field_shape(monkeypatch):
     assert "Mumbai-Santacruz" in meta.source_name
 
 
+def test_imd_provider_structured_detail_and_persistence_label(monkeypatch):
+    """The UI must render SOURCE/MODE/STATION/RETRIEVED/RAINFALL/FORECAST EXTENSION as distinct fields, not
+    by parsing prose -- meta.detail carries exactly those, plus the exact required label text."""
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row("18.4", station="Mumbai-Santacruz")]))
+    scen, meta = IMDObservationProvider(api_key="k").get()
+    d = meta.detail
+    assert d["source"] == "IMD"
+    assert d["station"] == "Mumbai-Santacruz"
+    assert d["observed_rainfall_mm"] == pytest.approx(18.4)
+    assert d["persistence_intensity_mm_h"] == pytest.approx(18.4 / 24.0, abs=1e-3)  # detail rounds to 3 dp
+    assert d["retrieved_at"]  # non-empty ISO8601 timestamp
+    # exact required label -- never "nowcast" or "forecast" standing alone
+    assert d["forecast_extension_label"] == "3-HOUR PERSISTENCE ESTIMATE"
+    label_lc = d["forecast_extension_label"].lower()
+    assert "nowcast" not in label_lc and "radar" not in label_lc
+    assert "radar" not in d["forecast_extension_note"].lower()
+    assert scen.provenance.to_dict() == meta.provenance.to_dict()  # same object both places, not re-declared
+
+
 def test_imd_provider_sends_the_configured_key(monkeypatch):
     _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row()]))
     IMDObservationProvider(station_id="43003", api_key="my-secret-key").get()
@@ -209,6 +228,24 @@ def test_imd_provider_raises_unavailable_on_http_error(monkeypatch):
     prov = IMDObservationProvider(api_key="wrong-or-unactivated-key")
     with pytest.raises(ProviderUnavailable):
         prov.get()
+
+
+def test_imd_provider_never_leaks_the_api_key_in_a_failure_message(monkeypatch):
+    """Regression test: the key is sent as a query parameter (see _fetch_current_wx's auth note), so a naive
+    `str(exception)` on a failed request includes the full request URL *with the key in it*. The message
+    raised to callers (and therefore returned in the HTTP 503 body) must never contain it."""
+    secret = "SECRET-DO-NOT-LEAK-98765"
+
+    class _RaisingClient(_FakeClient):
+        def get(self, url, params=None):
+            # simulate httpx's own exception text embedding the full URL, as it really does
+            raise RuntimeError(f"Client error '401 Unauthorized' for url '{url}?apikey={params.get('apikey')}'")
+
+    monkeypatch.setattr(__import__("httpx"), "Client", _RaisingClient)
+    prov = IMDObservationProvider(api_key=secret)
+    with pytest.raises(ProviderUnavailable) as exc_info:
+        prov.get()
+    assert secret not in str(exc_info.value)
 
 
 def test_imd_provider_raises_unavailable_rather_than_guess_missing_rainfall_field(monkeypatch):

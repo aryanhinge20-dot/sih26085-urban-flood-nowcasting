@@ -322,8 +322,14 @@ def _run_live_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
     the caller as HTTP 503, see api/main.py) rather than silently substituting a scenario/replay while still
     labelled live -- see docs/LIVE_RAINFALL_AUDIT.md and the FAILURE FALLBACK design it documents."""
     from ..rainfall.provider import list_providers, LIVE_ID
-    scen, _meta = list_providers()[LIVE_ID].get(LIVE_ID)
-    return _run_physics(scen, blockage, horizon_min, get_pilot())
+    scen, meta = list_providers()[LIVE_ID].get(LIVE_ID)
+    res = _run_physics(scen, blockage, horizon_min, get_pilot())
+    res.provenance = dict(res.provenance)
+    # Structured (not just prose) live-source detail for the UI's SOURCE/MODE/STATION/RETRIEVED/RAINFALL/
+    # FORECAST EXTENSION breakdown -- see RainfallSourceMeta.detail. Additive key; res.provenance["rainfall"]
+    # (the scenario's own Provenance) is untouched, so nothing that already reads it needs to change.
+    res.provenance["rainfall_source"] = meta.to_dict()
+    return res
 
 
 def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:

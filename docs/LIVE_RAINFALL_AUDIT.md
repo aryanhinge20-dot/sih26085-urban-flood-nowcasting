@@ -186,5 +186,58 @@ is already correct and tested for it) intentionally left out of this pass's scop
 - `current_wx`'s single station (Mumbai-Santacruz, ~10 km from the Hindmata/Dadar pilot, the same caveat
   already recorded for the July 2005 replay in `docs/DECISIONS.md`) is applied uniformly over the pilot grid
   — no spatial variation, same simplification already accepted for every other scenario in this project.
-- The dashboard cannot yet select "live" from its scenario dropdown (§7) — the backend contract is ready;
-  the frontend change was out of scope this pass.
+
+## 10. Configuration quick reference
+
+| Variable | Required | Default | Where |
+|---|---|---|---|
+| `IMD_API_KEY` | Yes, to enable LIVE at all | unset (LIVE disabled, honestly, not faked) | `.env` at repo root (git-ignored) or a real environment variable |
+| `IMD_STATION_ID` | No | `43003` (Mumbai-Santacruz) | same |
+| `IMD_API_KEY_HEADER` | No | `X-API-Key` | same — only matters if IMD's real header-name convention turns out to differ (§7) |
+
+Copy `.env.example` to `.env` and fill in `IMD_API_KEY` once a real key is obtained (see §3 for how — it is
+not self-service). **No real credential is committed anywhere in this repository**; `.env` is listed in
+`.gitignore`. No frontend or other backend code needs to change when a key is added — see §11.
+
+## 11. Dashboard integration (added after this audit — "LIVE OBSERVATION" UI)
+
+"Live Observation" is now a selectable entry in the existing scenario dropdown (synthesised client-side from
+`GET /api/status`'s `rainfall_providers` list, which already reported a `live` entry from the first pass of
+this work) — no second data path, no bypass of `IMDObservationProvider`. Running it calls the same
+`POST /api/simulate` used by every other scenario.
+
+**Three distinct rainfall concepts are now labelled consistently everywhere** (header, scenario panel,
+provenance): `SYNTHETIC SCENARIO`, `HISTORICAL REPLAY`, `LIVE OBSERVATION`. The persistence-derived 3h
+continuation is always labelled **"3-HOUR PERSISTENCE ESTIMATE"**, never "IMD nowcast", "radar nowcast",
+"official forecast" or "live forecast" — this exact string is emitted by the backend
+(`RainfallSourceMeta.detail.forecast_extension_label`) and rendered verbatim by the frontend, not composed
+from scratch in JS, so wording can't drift between the two layers.
+
+**No-credentials behaviour (verified live against the real, unmodified running server, not just tests):** a
+`POST /api/simulate {"scenario_id":"live"}` against this backend with no `IMD_API_KEY` configured returns a
+real `HTTP 503` with detail `"live rainfall unavailable: IMD_API_KEY is not configured -- live IMD data is
+disabled, not faked. ..."`, and `GET /api/status` reports `{"id":"live", "available": false, "reason":
+"IMD_API_KEY not configured"}`. The dashboard shows "LIVE UNAVAILABLE / IMD API credentials are not
+configured." and leaves whatever scenario/replay run was already on screen untouched -- it does not clear
+the map, switch scenarios, or otherwise silently substitute another data source while still labelled live.
+
+**Security fix made during this pass:** the original `IMDObservationProvider` sent the API key as a query
+parameter (necessary, since IMD's docs never specified the transmission mechanism -- see §7) but on a failed
+request, httpx's own exception text embeds the *full request URL, including the key*. That raw exception
+text was originally being included in the message raised (and therefore in the HTTP 503 body). Fixed:
+failure messages are now built from known-safe components only (station id, HTTP status code / exception
+class name); the full original exception is still logged server-side (operator-only) for debugging.
+Verified with a real (invalid-key) request against the actual `api.imd.gov.in` server that the key no longer
+appears in the raised/returned message, plus a regression test
+(`test_imd_provider_never_leaks_the_api_key_in_a_failure_message`).
+
+**Structured provenance (Task 4):** a live run's `SimulationResult.provenance` gained one additive key,
+`rainfall_source` (the existing `provenance.rainfall` key, and every other scenario's provenance shape, is
+untouched) — `RainfallSourceMeta.detail` carries `source`, `station`, `station_id`, `retrieved_at`,
+`observed_at`, `observed_rainfall_mm`, `persistence_intensity_mm_h`, `forecast_extension_label`, and
+`forecast_extension_note` as plain fields, so the UI renders SOURCE/MODE/STATION/RETRIEVED/RAINFALL/FORECAST
+EXTENSION directly rather than parsing them out of the prose provenance note.
+
+**Not done, still correctly out of scope:** SR-02 is not claimed as newly/fully satisfied by the persistence
+estimate (§6 stands unchanged) — the dashboard's own copy says "3-hour persistence estimate", never
+"forecast" or "nowcast", exactly to avoid that overclaim.

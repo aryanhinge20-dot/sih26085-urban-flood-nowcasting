@@ -264,9 +264,14 @@ def test_simulate_live_with_mocked_provider_runs_the_real_engine(monkeypatch):
     fake_scen = RainfallScenario(id="live", name="Live (IMD-observed, TEST)", t_s=t_s,
                                  intensity_mm_h=np.full_like(t_s, 3.0),
                                  provenance=Provenance(Tag.ESTIMATED, "test", "72.0 mm/24h persistence, mocked"))
-    fake_meta = RainfallSourceMeta(source_type="live_observation", source_name="IMD TEST", timestamp="2026-09-09T00:00:00+00:00",
+    fake_detail = {"source": "IMD", "station": "Mumbai-Santacruz", "station_id": "43003",
+                   "retrieved_at": "2026-09-09T00:00:00+00:00", "observed_at": "2026-09-09 00:00:00",
+                   "observation_type": "24h cumulative rainfall (observed)", "observed_rainfall_mm": 72.0,
+                   "persistence_intensity_mm_h": 3.0, "forecast_extension_label": "3-HOUR PERSISTENCE ESTIMATE",
+                   "forecast_extension_note": "Not an official IMD nowcast or forecast -- a persistence assumption."}
+    fake_meta = RainfallSourceMeta(source_type="live_observation", source_name="IMD Mumbai-Santacruz", timestamp="2026-09-09T00:00:00+00:00",
                                    forecast_horizon_min=HORIZON_S // 60, resolution_min=1440, data_mode="ESTIMATED",
-                                   provenance=fake_scen.provenance)
+                                   provenance=fake_scen.provenance, detail=fake_detail)
     monkeypatch.setattr(IMDObservationProvider, "get", lambda self, scenario_id=None, **kw: (fake_scen, fake_meta))
 
     r = client.post("/api/simulate", json={"scenario_id": "live", "blockage": {"mode": "none"}, "horizon_min": 30})
@@ -279,8 +284,41 @@ def test_simulate_live_with_mocked_provider_runs_the_real_engine(monkeypatch):
     assert body["n_frames"] >= 2
     assert abs(body["mass_balance"]["error_pct"]) < 0.1
 
+    # structured live detail (Task 4: SOURCE/MODE/STATION/RETRIEVED/RAINFALL/FORECAST EXTENSION) reaches the
+    # actual HTTP response, unmodified, alongside (not replacing) the existing provenance.rainfall key.
+    rs = body["provenance"]["rainfall_source"]
+    assert rs["source_type"] == "live_observation"
+    assert rs["detail"]["station"] == "Mumbai-Santacruz"
+    assert rs["detail"]["observed_rainfall_mm"] == 72.0
+    assert rs["detail"]["forecast_extension_label"] == "3-HOUR PERSISTENCE ESTIMATE"
+
     r2 = client.get(f"/api/simulate/{body['run_id']}")
     assert r2.status_code == 200 and r2.json()["run_id"] == body["run_id"]
+
+
+def test_simulate_live_failure_message_never_contains_a_key(monkeypatch):
+    """End-to-end (not just the provider unit test): a failing live call must still reach the HTTP client as
+    a clean 503 with no key/secret in the body, exercising the real api/main.py error-handling path."""
+    from floodnet.rainfall.provider import IMDObservationProvider, ProviderUnavailable
+
+    def _boom(self, scenario_id=None, **kw):
+        raise ProviderUnavailable("IMD current_wx request failed (station 43003): HTTP 401")
+
+    monkeypatch.setattr(IMDObservationProvider, "get", _boom)
+    r = client.post("/api/simulate", json={"scenario_id": "live", "blockage": {"mode": "none"}, "horizon_min": 30})
+    assert r.status_code == 503
+    assert "Traceback" not in r.text
+    assert "SECRET" not in r.text and "apikey=" not in r.text.lower()
+
+
+def test_simulate_static_scenarios_unaffected_by_live_wiring():
+    """Regression: adding scenario_id='live' support must not change behaviour for the existing modes."""
+    for sid in ("heavy", "july2005"):
+        r = client.post("/api/simulate", json={"scenario_id": sid, "blockage": {"mode": "none"}, "horizon_min": 15})
+        _skip_if_503(r)
+        assert r.status_code == 200, r.text
+        assert r.json()["scenario_id"] == sid
+        assert "rainfall_source" not in r.json()["provenance"]  # only the live path adds this key
 
 
 def test_status_reports_live_provider_configured_state(monkeypatch):

@@ -7,6 +7,9 @@ export default function Header() {
 
   const dataModeReal = status?.data_mode === 'REAL'
   const sourceType = currentScenario?.source?.source_type // 'scenario' | 'historical_replay'
+  // Based on the RUN that actually executed, not just the dropdown selection -- a forecast is only
+  // "live-driven" once IMD data was genuinely fetched and used, never merely because "Live" is selected.
+  const runIsLive = Boolean(run?.provenance?.rainfall_source)
 
   let statusLabel = 'Idle — select a scenario and run a forecast'
   let statusDot = ''
@@ -35,7 +38,11 @@ export default function Header() {
 
       <div className={styles.pilot}>
         <div className={styles.pilotName}>{meta?.pilot?.name || 'Pilot: Hindmata / Dadar, Mumbai'}</div>
-        <div className={styles.pilotSub}>0&ndash;3 h street-level flood forecast</div>
+        <div className={styles.pilotSub}>
+          {runIsLive
+            ? 'Flood forecast driven by live IMD observation + persistence estimate'
+            : '0–3 h street-level flood forecast'}
+        </div>
       </div>
 
       <div className={styles.spacer} />
@@ -44,7 +51,9 @@ export default function Header() {
         <span className={`${styles.pill} ${dataModeReal ? styles.pillReal : styles.pillDemo}`}>
           {dataModeReal ? 'REAL PILOT DATA' : 'DEMONSTRATION DATA'}
         </span>
-        {sourceType === 'historical_replay' ? (
+        {runIsLive ? (
+          <span className={`${styles.pill} ${styles.pillReal}`}>LIVE OBSERVATION</span>
+        ) : sourceType === 'historical_replay' ? (
           <span className={`${styles.pill} ${styles.pillReplay}`}>HISTORICAL REPLAY</span>
         ) : sourceType === 'scenario' ? (
           <span className={`${styles.pill} ${styles.pillSource}`}>SYNTHETIC SCENARIO</span>

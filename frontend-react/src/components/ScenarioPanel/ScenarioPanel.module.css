@@ -56,3 +56,99 @@
   color: #ffb3b3;
   font-size: 11px;
 }
+
+/* --- live status indicator (Task 5) --- */
+.liveStatus {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+.liveStatusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 3px;
+  flex: 0 0 auto;
+  background: var(--text-faint);
+}
+.liveStatus_ok .liveStatusDot {
+  background: var(--real);
+  box-shadow: 0 0 8px rgba(34, 230, 163, 0.6);
+}
+.liveStatus_bad .liveStatusDot {
+  background: var(--sev-severe);
+}
+.liveStatus_idle .liveStatusDot {
+  background: var(--accent);
+}
+.liveStatusTitle {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+}
+.liveStatus_ok .liveStatusTitle {
+  color: var(--real);
+}
+.liveStatus_bad .liveStatusTitle {
+  color: var(--sev-severe);
+}
+.liveStatus_idle .liveStatusTitle {
+  color: var(--accent);
+}
+.liveStatusSub {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  margin-top: 1px;
+  line-height: 1.4;
+}
+
+/* --- live provenance block (Task 4/6) --- */
+.liveProv {
+  margin-top: 12px;
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+}
+.liveHeadline {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+.liveRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+.liveLabel {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  font-weight: 700;
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+.liveValue {
+  color: var(--text);
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.liveNote {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}

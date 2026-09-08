@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -50,7 +50,7 @@ LIVE_ID = "live"
 @dataclass(frozen=True)
 class RainfallSourceMeta:
     """Metadata about WHERE a `RainfallScenario`'s numbers came from (not what they are)."""
-    source_type: str            # "scenario" | "historical_replay" | "external_nowcast"
+    source_type: str            # "scenario" | "historical_replay" | "live_observation" | "external_nowcast"
     source_name: str
     timestamp: str               # ISO8601 fetch/production time; "N/A (design storm)" for synthetic scenarios,
                                   # or the real historical event date for a replay
@@ -58,11 +58,17 @@ class RainfallSourceMeta:
     resolution_min: int          # temporal resolution of the underlying source series (minutes)
     data_mode: str                # "SYNTHETIC" | "REAL" | "DEMONSTRATION" | "NWP" (matches provenance.Tag)
     provenance: Provenance
+    # Small structured extras a UI can render as distinct labelled fields without parsing prose out of
+    # `provenance.note`. Empty for scenario/replay (their note text is already a complete, short story);
+    # populated by IMDObservationProvider with exactly the fields a "live" run needs to show honestly:
+    # station, the raw observed value, when it was observed, the derived persistence rate, and an explicit
+    # "forecast_extension" label the UI must show verbatim (never call it a nowcast/forecast on its own).
+    detail: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"source_type": self.source_type, "source_name": self.source_name, "timestamp": self.timestamp,
                 "forecast_horizon_min": self.forecast_horizon_min, "resolution_min": self.resolution_min,
-                "data_mode": self.data_mode, "provenance": self.provenance.to_dict()}
+                "data_mode": self.data_mode, "provenance": self.provenance.to_dict(), "detail": self.detail}
 
 
 class ProviderUnavailable(RuntimeError):
@@ -210,13 +216,21 @@ class IMDObservationProvider(RainfallProvider):
         header_name = os.environ.get(self.API_KEY_HEADER_ENV, "X-API-Key")
         headers = {"Authorization": f"Bearer {key}", header_name: key}
         url = f"{self.BASE_URL}/current_wx"
+        status_code: Optional[int] = None
         try:
             with httpx.Client(headers=headers, timeout=self.TIMEOUT_S) as client:
                 r = client.get(url, params={"id": self.station_id, "apikey": key})
+                status_code = r.status_code
                 r.raise_for_status()
                 data = r.json()
         except Exception as ex:  # noqa: BLE001
-            raise ProviderUnavailable(f"IMD current_wx request failed ({url}, station {self.station_id}): {ex}") from ex
+            # SECURITY: never put `ex` (or the request URL) into the message that reaches the HTTP client --
+            # the key is sent as a query parameter (see note above), so httpx's own exception text for a
+            # failed request includes the full URL *with the key in it*. Full detail (safe: server-side only)
+            # goes to the log; only a sanitised, key-free summary is raised/returned to callers.
+            log.warning("IMD current_wx request failed (station %s): %s", self.station_id, ex)
+            reason = f"HTTP {status_code}" if status_code else type(ex).__name__
+            raise ProviderUnavailable(f"IMD current_wx request failed (station {self.station_id}): {reason}") from None
         return data, datetime.now(timezone.utc)
 
     def _normalize(self, payload: dict, retrieved_at: datetime) -> tuple[RainfallScenario, RainfallSourceMeta]:
@@ -252,9 +266,23 @@ class IMDObservationProvider(RainfallProvider):
                                  intensity_mm_h=intensity_mm_h, provenance=prov,
                                  description="Persistence forecast from IMD's live 24h observed rainfall total; "
                                              "see provenance note for the exact figures and the assumption used.")
+        detail = {
+            "source": "IMD", "station": station_name, "station_id": self.station_id,
+            "retrieved_at": retrieved_at.isoformat(),
+            "observed_at": obs_time or None,
+            "observation_type": "24h cumulative rainfall (observed)",
+            "observed_rainfall_mm": round(total_24h_mm, 2),
+            "persistence_intensity_mm_h": round(mean_mm_h, 3),
+            # Exact label the UI must display verbatim -- NEVER "nowcast"/"forecast"/"radar" on their own.
+            "forecast_extension_label": "3-HOUR PERSISTENCE ESTIMATE",
+            "forecast_extension_note": ("Not an official IMD nowcast or forecast -- a simple persistence "
+                                        "assumption (last observed rate held constant) applied by FloodNet, "
+                                        "documented in docs/LIVE_RAINFALL_AUDIT.md."),
+        }
         meta = RainfallSourceMeta(source_type="live_observation", source_name=f"IMD {station_name}",
                                    timestamp=retrieved_at.isoformat(), forecast_horizon_min=HORIZON_S // 60,
-                                   resolution_min=24 * 60, data_mode=Tag.ESTIMATED.value, provenance=prov)
+                                   resolution_min=24 * 60, data_mode=Tag.ESTIMATED.value, provenance=prov,
+                                   detail=detail)
         return scen, meta
 
 

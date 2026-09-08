@@ -16,6 +16,22 @@ export const SIMULATE_STAGES = [
   'Mapping street risk',
 ]
 
+// Reserved scenario id for a LIVE OBSERVATION run (floodnet/rainfall/provider.py::LIVE_ID) -- routed through
+// the exact same POST /api/simulate contract as every other scenario, never a second data path.
+export const LIVE_ID = 'live'
+
+// A failed live attempt is either "not configured" (no IMD_API_KEY -- the expected, common case right now)
+// or "configured but the request itself failed" (network/parse error) -- api/main.py's 503 detail always
+// names IMD_API_KEY for the former, so that substring is the one signal the frontend needs. Never leaks
+// anything from `e.message` beyond this classification -- the backend already sanitises it (no key/secrets
+// ever reach this string; see floodnet/rainfall/provider.py's key-leak fix).
+function classifyLiveFailure(e) {
+  if (e?.status === 503 && /IMD_API_KEY/.test(e.message || '')) {
+    return { status: 'unavailable', message: 'IMD API credentials are not configured.' }
+  }
+  return { status: 'error', message: 'IMD request failed.' }
+}
+
 const DEFAULT_LAYERS = {
   streets: true,
   depth: true,
@@ -57,6 +73,12 @@ export function FloodNetProvider({ children }) {
   const [simulating, setSimulating] = useState(false)
   const [simStageIdx, setSimStageIdx] = useState(0)
   const [simError, setSimError] = useState(null)
+
+  // Tracks the outcome of the most recent LIVE OBSERVATION attempt specifically, independent of `run`/
+  // `simError` (a failed live attempt must never touch whatever scenario/replay run is currently on
+  // screen). status: null (never attempted this session) | 'success' | 'unavailable' (no credentials) |
+  // 'error' (credentials configured but the request/parse failed).
+  const [liveAttempt, setLiveAttempt] = useState({ status: null, message: null, timestamp: null })
 
   const [selectedSegId, setSelectedSegId] = useState(null)
   const [explain, setExplain] = useState(null)
@@ -137,6 +159,7 @@ export function FloodNetProvider({ children }) {
   const runSimulation = useCallback(
     async (horizonMin = 180) => {
       if (!scenarioId) return
+      const isLive = scenarioId === LIVE_ID
       setSimulating(true)
       setSimError(null)
       startStageCycle()
@@ -147,9 +170,19 @@ export function FloodNetProvider({ children }) {
           .getSeries(res.run_id)
           .then(setSeries)
           .catch((e) => notify(e.message, 'error'))
+        if (isLive) {
+          setLiveAttempt({
+            status: 'success',
+            message: 'IMD observation received',
+            timestamp: res.provenance?.rainfall_source?.timestamp ?? null,
+          })
+        }
       } catch (e) {
         setSimError(e.message)
         notify(e.message)
+        // A failed LIVE attempt must never disturb whatever scenario/replay run is already on screen --
+        // applyRun() above was simply never called, so `run`/`frame`/the map all stay exactly as they were.
+        if (isLive) setLiveAttempt(classifyLiveFailure(e))
       } finally {
         stopStageCycle()
         setSimulating(false)
@@ -348,6 +381,7 @@ export function FloodNetProvider({ children }) {
       simStage: SIMULATE_STAGES[simStageIdx],
       simStageIdx,
       simError,
+      liveAttempt,
       runSimulation,
       runCompare,
       selectedSegId,
@@ -368,7 +402,7 @@ export function FloodNetProvider({ children }) {
     [
       meta, status, provenance, scenarios, currentScenario, scenarioId, blockage, bootLoading, bootError,
       roads, topology, hotspots, terrain, run, compareResult, series, frame, currentT, playing, simulating,
-      simStageIdx, simError, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
+      simStageIdx, simError, liveAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
       explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, layers, toggleLayer, notice, notify,
     ],
   )
