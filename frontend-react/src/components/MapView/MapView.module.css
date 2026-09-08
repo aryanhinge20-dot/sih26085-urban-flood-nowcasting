@@ -1,0 +1,98 @@
+.mapEl {
+  position: absolute;
+  inset: 0;
+  background: #0b0f18;
+}
+.mapEl :global(.leaflet-container) {
+  background: #0b0f18;
+  font-family: var(--font);
+}
+.mapEl :global(.leaflet-control-attribution) {
+  background: rgba(7, 10, 16, 0.75) !important;
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+.mapEl :global(.leaflet-control-attribution a) {
+  color: var(--accent-dim);
+}
+.mapEl :global(.leaflet-tile-pane) {
+  filter: brightness(0.55) saturate(0.55) contrast(1.08);
+}
+.mapEl :global(.leaflet-tooltip) {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 6px 9px;
+}
+.mapEl :global(.leaflet-tooltip)::before {
+  display: none;
+}
+.mapEl :global(.route-marker) {
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+.mapEl :global(.route-marker-inner) {
+  width: 26px;
+  height: 26px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  border: 2px solid #0b0f18;
+}
+.mapEl :global(.route-marker-inner span) {
+  transform: rotate(45deg);
+  font-weight: 800;
+  font-size: 11px;
+  color: #0b0f18;
+}
+.mapEl :global(.node-pulse) {
+  animation: pulse 1.1s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    stroke-opacity: 0.95;
+    stroke-width: 2px;
+  }
+  50% {
+    stroke-opacity: 0.25;
+    stroke-width: 9px;
+  }
+}
+
+.legend {
+  position: absolute;
+  left: 14px;
+  bottom: 148px;
+  z-index: 900;
+  padding: 10px 13px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+.legendTitle {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.legendRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+.legendSwatch {
+  width: 13px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}

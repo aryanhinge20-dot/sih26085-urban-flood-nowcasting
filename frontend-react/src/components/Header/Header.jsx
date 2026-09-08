@@ -1,0 +1,65 @@
+import { useFloodNet } from '../../state/FloodNetContext.jsx'
+import { fmtMinutes } from '../../lib/format.js'
+import styles from './Header.module.css'
+
+export default function Header() {
+  const { meta, status, currentScenario, run, currentT, simulating, bootLoading, bootError } = useFloodNet()
+
+  const dataModeReal = status?.data_mode === 'REAL'
+  const sourceType = currentScenario?.source?.source_type // 'scenario' | 'historical_replay'
+
+  let statusLabel = 'Idle — select a scenario and run a forecast'
+  let statusDot = ''
+  if (bootLoading) {
+    statusLabel = 'Connecting to FloodNet backend…'
+  } else if (bootError) {
+    statusLabel = 'Some pilot layers unavailable'
+    statusDot = styles.statusDotBad
+  } else if (simulating) {
+    statusLabel = 'Generating forecast…'
+    statusDot = styles.statusDotBusy
+  } else if (run) {
+    statusLabel = 'Forecast ready'
+    statusDot = styles.statusDotOk
+  }
+
+  return (
+    <header className={`${styles.header} glass-panel`}>
+      <div className={styles.brand}>
+        <span className={styles.dot} />
+        <div>
+          <div className={styles.title}>FloodNet</div>
+          <div className={styles.tagline}>Urban Flood Nowcasting</div>
+        </div>
+      </div>
+
+      <div className={styles.pilot}>
+        <div className={styles.pilotName}>{meta?.pilot?.name || 'Pilot: Hindmata / Dadar, Mumbai'}</div>
+        <div className={styles.pilotSub}>0&ndash;3 h street-level flood forecast</div>
+      </div>
+
+      <div className={styles.spacer} />
+
+      <div className={styles.badges}>
+        <span className={`${styles.pill} ${dataModeReal ? styles.pillReal : styles.pillDemo}`}>
+          {dataModeReal ? 'REAL PILOT DATA' : 'DEMONSTRATION DATA'}
+        </span>
+        {sourceType === 'historical_replay' ? (
+          <span className={`${styles.pill} ${styles.pillReplay}`}>HISTORICAL REPLAY</span>
+        ) : sourceType === 'scenario' ? (
+          <span className={`${styles.pill} ${styles.pillSource}`}>SYNTHETIC SCENARIO</span>
+        ) : null}
+      </div>
+
+      <div className={styles.clock}>
+        <div className={styles.clockLabel}>Forecast time</div>
+        {run ? `T+${fmtMinutes(currentT)}` : '—'}
+      </div>
+
+      <div className={styles.status}>
+        <span className={`${styles.statusDot} ${statusDot}`} />
+        {statusLabel}
+      </div>
+    </header>
+  )
+}

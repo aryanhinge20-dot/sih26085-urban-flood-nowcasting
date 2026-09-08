@@ -8,7 +8,11 @@ REPO_DIR = BACKEND_DIR.parent
 DATA_RAW = REPO_DIR / "data" / "raw"
 DATA_PROCESSED = REPO_DIR / "data" / "processed" / "pilot"
 MCGM_RAW = DATA_RAW / "mcgm_gis"
-FRONTEND_DIR = REPO_DIR / "frontend"
+FRONTEND_LEGACY_DIR = REPO_DIR / "frontend"              # original vanilla-JS dashboard (kept as a fallback)
+FRONTEND_REACT_DIST = REPO_DIR / "frontend-react" / "dist"  # `cd frontend-react && npm run build` output
+# Serve the built React app once it exists; fall back to the legacy static dashboard so the API server
+# never breaks in an environment where `npm run build` hasn't been run yet (e.g. a fresh clone).
+FRONTEND_DIR = FRONTEND_REACT_DIST if FRONTEND_REACT_DIST.is_dir() else FRONTEND_LEGACY_DIR
 
 # --- CRS ----------------------------------------------------------------------
 # ALL computation in EPSG:32643 (WGS84 / UTM 43N, metres). Lon/lat (EPSG:4326) only at API/UI boundary.

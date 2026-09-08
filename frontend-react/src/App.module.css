@@ -1,0 +1,44 @@
+.root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+.mapLayer {
+  position: absolute;
+  inset: 0;
+}
+
+.leftPanel,
+.rightPanel {
+  position: absolute;
+  top: 76px;
+  bottom: 132px;
+  width: 328px;
+  padding: 14px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 800;
+}
+.leftPanel {
+  left: 14px;
+}
+.rightPanel {
+  right: 14px;
+}
+
+@media (max-width: 1500px) {
+  .leftPanel,
+  .rightPanel {
+    width: 284px;
+  }
+}
+
+@media (max-width: 1400px) {
+  .leftPanel,
+  .rightPanel {
+    width: 250px;
+    padding: 10px 10px 14px;
+  }
+}

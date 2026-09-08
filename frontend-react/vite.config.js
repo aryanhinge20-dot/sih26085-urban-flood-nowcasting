@@ -1,0 +1,21 @@
+import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
+
+// Built output is served by the FastAPI backend from /static (see backend/floodnet/config.py::FRONTEND_DIR
+// and backend/floodnet/api/main.py's StaticFiles mount) -- base must match that mount prefix so the built
+// index.html's asset URLs resolve. In dev, the Vite dev server proxies /api/* to the backend (see below) so
+// `npm run dev` talks to a locally running `uvicorn floodnet.api.main:app --port 8000`.
+export default defineConfig({
+  plugins: [react()],
+  base: '/static/',
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+    },
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+  },
+})
