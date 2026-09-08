@@ -7,8 +7,9 @@ Physics (explainable, mass-conserving, fully vectorised):
     with h_eff = depth in the upstream (higher-H) cell above the higher of the two bed elevations
     (LISFLOOD-FP style "flow depth", Bates & De Roo 2000).
   * Face volume per sub-step V = q * res * dt is limited so that (a) the total outflow of a cell never exceeds
-    its stored volume and (b) a face never moves more than half the head-difference volume (no overshoot /
-    level inversion between the two cells).
+    its stored volume and (b) a face never moves more than 1/8 of the head-difference volume |dH|*A
+    (a cell has 4 faces and each face touches 2 cells -> no level inversion / checkerboard; flow limiter in
+    the spirit of Hunter et al. 2005).
   * Adaptive sub-stepping inside step(): dt_sub <= 0.5 * res / max(velocity), velocity = q / h_eff,
     with a floor DT_MIN_S to bound the work.
   * Buildings are no-flow obstacles (all faces touching a building cell are masked).
@@ -29,6 +30,7 @@ MANNING_N = 0.03      # urban street / mixed surface roughness
 H_MIN = 1e-6          # m, dry threshold for flux computation
 DT_MIN_S = 0.05       # s, floor for the adaptive sub-step
 CFL = 0.5
+HEAD_CAP = 1.0 / 8.0  # max fraction of the head-difference volume a face may move per sub-step (4 faces x 2 cells)
 
 PROVENANCE = Provenance(
     Tag.ESTIMATED,
@@ -98,71 +100,54 @@ class StorageCellSurface:
         return removed
 
     # ------------------------------------------------------------------ routing
-    def _face_fluxes(self, h: np.ndarray):
-        """Returns signed unit fluxes qx, qy (m2/s, + means toward increasing index), head diffs, h_eff and max velocity."""
-        H = self.z + h
-        # x faces
-        dHx = H[:, :-1] - H[:, 1:]
-        hx = np.maximum(np.maximum(H[:, :-1], H[:, 1:]) - self.zmax_x, 0.0)
-        hx[~self.open_x] = 0.0
-        hx[hx < H_MIN] = 0.0
-        sx = np.sqrt(np.abs(dHx)) * self.sqrt_inv_dx
-        qx = self.inv_n * hx ** (5.0 / 3.0) * sx * np.sign(dHx)
-        # y faces
-        dHy = H[:-1, :] - H[1:, :]
-        hy = np.maximum(np.maximum(H[:-1, :], H[1:, :]) - self.zmax_y, 0.0)
-        hy[~self.open_y] = 0.0
-        hy[hy < H_MIN] = 0.0
-        sy = np.sqrt(np.abs(dHy)) * self.sqrt_inv_dx
-        qy = self.inv_n * hy ** (5.0 / 3.0) * sy * np.sign(dHy)
-        # velocity = q / h_eff = (1/n) h^(2/3) sqrt(S)
-        vx = self.inv_n * hx ** (2.0 / 3.0) * sx
-        vy = self.inv_n * hy ** (2.0 / 3.0) * sy
-        vmax = max(float(vx.max()) if vx.size else 0.0, float(vy.max()) if vy.size else 0.0)
-        return qx, qy, dHx, dHy, vmax
-
-    def _substep(self, dt: float) -> None:
+    def _substep(self, remaining: float) -> float:
+        """One explicit sub-step of at most `remaining` seconds; returns the dt actually used."""
         h = self.depth
         A = self.area
-        qx, qy, dHx, dHy, _ = self._face_fluxes(h)
-        # face volumes (m3), capped at half the head-difference volume (no level inversion)
-        Vx = qx * self.res * dt
-        Vy = qy * self.res * dt
-        capx = 0.5 * np.abs(dHx) * A
-        capy = 0.5 * np.abs(dHy) * A
-        Vx = np.clip(Vx, -capx, capx)
-        Vy = np.clip(Vy, -capy, capy)
-        # total outflow per cell must not exceed stored volume
+        H = self.z + h
+        # x faces (between (j,i) and (j,i+1)); y faces (between (j,i) and (j+1,i))
+        dHx = H[:, :-1] - H[:, 1:]
+        dHy = H[:-1, :] - H[1:, :]
+        hx = np.maximum(H[:, :-1], H[:, 1:]); hx -= self.zmax_x
+        hy = np.maximum(H[:-1, :], H[1:, :]); hy -= self.zmax_y
+        hx[(hx < H_MIN) | ~self.open_x] = 0.0
+        hy[(hy < H_MIN) | ~self.open_y] = 0.0
+        # velocity = (1/n) h_eff^(2/3) sqrt(|dH|/dx); unit flux q = v * h_eff (m2/s)
+        vx = np.cbrt(hx * hx); vx *= np.sqrt(np.abs(dHx)); vx *= self.inv_n * self.sqrt_inv_dx
+        vy = np.cbrt(hy * hy); vy *= np.sqrt(np.abs(dHy)); vy *= self.inv_n * self.sqrt_inv_dx
+        vmax = max(float(vx.max()), float(vy.max()))
+        dt = remaining if vmax <= 0.0 else min(remaining, self.cfl * self.res / vmax)
+        dt = max(dt, min(self.dt_min, remaining))
+        # signed face volumes (m3) over dt, capped at HEAD_CAP * head-difference volume (no level inversion)
+        Vx = vx * hx; Vx *= self.res * dt; np.minimum(Vx, HEAD_CAP * np.abs(dHx) * A, out=Vx); np.copysign(Vx, dHx, out=Vx)
+        Vy = vy * hy; Vy *= self.res * dt; np.minimum(Vy, HEAD_CAP * np.abs(dHy) * A, out=Vy); np.copysign(Vy, dHy, out=Vy)
+        # total outflow per cell must not exceed stored volume -> scale faces by upstream cell factor
         out = np.zeros_like(h)
-        px = np.maximum(Vx, 0.0); nxv = np.maximum(-Vx, 0.0)
-        py = np.maximum(Vy, 0.0); nyv = np.maximum(-Vy, 0.0)
-        out[:, :-1] += px; out[:, 1:] += nxv
-        out[:-1, :] += py; out[1:, :] += nyv
+        out[:, :-1] += np.maximum(Vx, 0.0); out[:, 1:] -= np.minimum(Vx, 0.0)
+        out[:-1, :] += np.maximum(Vy, 0.0); out[1:, :] -= np.minimum(Vy, 0.0)
         stored = h * A
-        scale = np.where(out > stored, stored / np.maximum(out, 1e-300), 1.0)
-        # scale each face by its upstream cell's factor
-        Vx = np.where(Vx > 0, Vx * scale[:, :-1], Vx * scale[:, 1:])
-        Vy = np.where(Vy > 0, Vy * scale[:-1, :], Vy * scale[1:, :])
-        dh = np.zeros_like(h)
-        dh[:, :-1] -= Vx; dh[:, 1:] += Vx
-        dh[:-1, :] -= Vy; dh[1:, :] += Vy
-        h += dh / A
+        over = out > stored
+        if over.any():
+            scale = np.ones_like(h)
+            scale[over] = stored[over] / out[over]
+            Vx *= np.where(Vx > 0, scale[:, :-1], scale[:, 1:])
+            Vy *= np.where(Vy > 0, scale[:-1, :], scale[1:, :])
+        Vx *= 1.0 / A; Vy *= 1.0 / A
+        h[:, :-1] -= Vx; h[:, 1:] += Vx
+        h[:-1, :] -= Vy; h[1:, :] += Vy
         np.maximum(h, 0.0, out=h)
-        # infiltration (pervious fraction of open cells)
         if self.infil_rate > 0.0:
             inf = np.minimum(h, self._infil_depth_rate * dt)
             h -= inf
             self._infiltrated += float(inf.sum()) * A
+        return dt
 
     def step(self, dt_s: float) -> float:
-        """Advance the surface by dt_s using adaptive sub-steps. Returns the first sub-step size used."""
+        """Advance the surface by dt_s using adaptive CFL-limited sub-steps. Returns the first sub-step size used."""
         remaining = float(dt_s)
         first = None
         while remaining > 1e-9:
-            _, _, _, _, vmax = self._face_fluxes(self.depth)
-            dt = remaining if vmax <= 0.0 else min(remaining, self.cfl * self.res / vmax)
-            dt = max(dt, min(self.dt_min, remaining))
-            self._substep(dt)
+            dt = self._substep(remaining)
             remaining -= dt
             self.substeps += 1
             if first is None:

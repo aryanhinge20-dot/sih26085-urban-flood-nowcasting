@@ -158,6 +158,8 @@ class MassBalance:
     infiltration_m3: float
     error_m3: float
     error_pct: float
+    abstraction_m3: float = 0.0      # rain that never became runoff (runoff-coefficient losses); counted so the balance closes
+    runoff_in_m3: float = 0.0        # net runoff delivered to the surface
 
 
 @dataclass

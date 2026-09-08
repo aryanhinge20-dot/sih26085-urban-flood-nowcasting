@@ -32,6 +32,7 @@ def run_simulation(terrain: Terrain, net: DrainageNetwork, scenario: RainfallSce
 
     frames: list[Frame] = []
     rain_in = 0.0
+    runoff_in = 0.0
     surcharge_accum = np.zeros(net.n_nodes, dtype=np.float32)
     t = 0.0
     next_frame = 0.0
@@ -53,6 +54,7 @@ def run_simulation(terrain: Terrain, net: DrainageNetwork, scenario: RainfallSce
         i_mm_h = scenario.intensity_at(t)
         runoff_depth = runoff_fn(i_mm_h, step, terrain)                     # [ny,nx] m
         rain_in += i_mm_h / 1000.0 / 3600.0 * step * g.cell_area * g.nx * g.ny  # gross rain volume on grid
+        runoff_in += float(np.sum(runoff_depth)) * g.cell_area                     # net runoff (after coefficient losses)
         surface.add_runoff(runoff_depth)
         # 2. surface -> drainage (inlet capture limited by inlet + network capacity)
         cap = drainage.inlet_capacity_m3(step)                               # [N] m3
@@ -75,9 +77,11 @@ def run_simulation(terrain: Terrain, net: DrainageNetwork, scenario: RainfallSce
             if progress: progress(t / horizon_s)
 
     surf = surface.total_volume_m3(); netv = drainage.stored_m3(); out = drainage.outflow_m3(); inf = surface.infiltrated_m3()
-    err = rain_in - (surf + netv + out + inf)
+    abstraction = rain_in - runoff_in
+    err = runoff_in - (surf + netv + out + inf)
     mb = MassBalance(rain_in_m3=rain_in, surface_stored_m3=surf, network_stored_m3=netv, outfall_out_m3=out,
-                     infiltration_m3=inf, error_m3=err, error_pct=(100.0 * err / rain_in) if rain_in > 0 else 0.0)
+                     infiltration_m3=inf, error_m3=err, error_pct=(100.0 * err / runoff_in) if runoff_in > 0 else 0.0,
+                     abstraction_m3=abstraction, runoff_in_m3=runoff_in)
     prov = {"terrain": terrain.provenance.to_dict(), "impervious": terrain.impervious_provenance.to_dict(),
             "buildings": terrain.building_provenance.to_dict(), "rainfall": scenario.provenance.to_dict(),
             "network": net.provenance}
