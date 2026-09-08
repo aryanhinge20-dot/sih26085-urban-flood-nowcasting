@@ -6,6 +6,7 @@ Every data-bearing response carries `provenance`. Missing sibling modules -> HTT
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any, Optional
 
 import numpy as np
@@ -231,6 +232,19 @@ def _streets_geojson(roads_graph, street_depth_m: dict) -> dict:
     return {"type": "FeatureCollection", "features": feats}
 
 
+@lru_cache(maxsize=state.MAX_RUNS + 4)
+def _run_max_depth_m(run_id: str) -> float:
+    """The scale used across every frame of a run must be the run-wide max, not the per-frame max (else the
+    colour scale would jump around while scrubbing) -- but recomputing max() over every frame's full grid on
+    *every* single-frame request (the frontend does this on every timeline scrub) was pure repeated work: the
+    result is fixed the moment a run finishes. Cached by run_id, which floodnet.simulation.engine mints as a
+    fresh uuid4 per run, so a cache hit always belongs to the same immutable SimulationResult."""
+    res = state.get_run(run_id)
+    if res is None:
+        return 0.0
+    return max((float(np.nanmax(fr.depth)) for fr in res.frames), default=0.0)
+
+
 def serialize_frame(res: SimulationResult, k: int) -> dict:
     p = _pilot(); net = p["net"]; f = res.frames[k]
     lon, lat = state.xy_to_lonlat(net.node_x, net.node_y)
@@ -239,7 +253,7 @@ def serialize_frame(res: SimulationResult, k: int) -> dict:
               "cause": str(f.node_cause[n])} for n in range(net.n_nodes)]
     edges = [{"id": str(net.edge_id[e]), "util": _f(f.edge_util[e]), "flow_m3s": _f(f.edge_flow_m3s[e])}
              for e in range(net.n_edges)]
-    run_max_m = max((float(np.nanmax(fr.depth)) for fr in res.frames), default=0.0)
+    run_max_m = _run_max_depth_m(res.run_id)
     png, vmax = depth_png_base64(f.depth, max_depth_m=run_max_m if run_max_m > 0 else None)
     return {"run_id": res.run_id, "t_min": f.t_s / 60.0, "rain_mm_h": _f(f.rain_mm_h),
             "streets": _streets_geojson(p.get("roads"), f.street_depth_m),
