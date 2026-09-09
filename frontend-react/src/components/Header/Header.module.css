@@ -3,143 +3,139 @@
   top: 14px;
   left: 14px;
   right: 14px;
-  height: 60px;
+  height: 56px;
   z-index: 1000;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 0 20px;
+  gap: 18px;
+  padding: 0 18px;
 }
 
+/* Brand */
 .brand {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 10px;
   flex: 0 0 auto;
 }
 .dot {
-  width: 13px;
-  height: 13px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 16px var(--accent-glow);
   flex: 0 0 auto;
+  transition: box-shadow 0.3s ease;
+}
+.dotSimulating {
+  animation: blink-dot 1.2s ease-in-out infinite;
 }
 .title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 800;
-  letter-spacing: 0.2px;
-  line-height: 1.15;
+  letter-spacing: -0.2px;
+  color: var(--text);
+  line-height: 1.2;
 }
 .tagline {
-  font-size: 10.5px;
-  color: var(--text-dim);
+  font-size: 10px;
+  color: var(--text-faint);
   font-weight: 500;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.1px;
+  line-height: 1.2;
 }
 
+/* Pilot */
 .pilot {
   flex: 0 0 auto;
-  padding-left: 18px;
+  padding-left: 16px;
   border-left: 1px solid var(--border);
-  line-height: 1.25;
+  line-height: 1.3;
 }
 .pilotName {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 700;
+  color: var(--text);
 }
 .pilotSub {
   font-size: 10px;
   color: var(--text-faint);
 }
 
-.spacer {
-  flex: 1;
-}
+.spacer { flex: 1; }
 
-.badges {
+/* Composite data-mode — the key semantic fix */
+.dataMode {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
   flex: 0 0 auto;
+  max-width: 320px;
 }
-
-.pill {
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: 0.5px;
+.dataModeInfra {
+  color: var(--text-dim);
   white-space: nowrap;
-  border: 1px solid transparent;
 }
-.pillReal {
-  background: rgba(34, 230, 163, 0.14);
-  color: var(--real);
-  border-color: rgba(34, 230, 163, 0.4);
+.dataModeSep {
+  color: var(--text-faint);
 }
-.pillDemo {
-  background: rgba(255, 183, 3, 0.14);
-  color: var(--synthetic);
-  border-color: rgba(255, 183, 3, 0.4);
-}
-.pillSource {
-  background: rgba(0, 212, 255, 0.1);
-  color: var(--accent);
-  border-color: rgba(0, 212, 255, 0.35);
-}
-.pillReplay {
-  background: rgba(167, 139, 250, 0.14);
-  color: #c9b6ff;
-  border-color: rgba(167, 139, 250, 0.4);
-}
-
-.clock {
-  font-family: var(--mono);
-  font-size: 13px;
+.dataModeRainfall {
   font-weight: 700;
-  color: var(--text);
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+}
+.dataModeSynth  { background: rgba(245,166,35,0.12);   color: var(--synthetic);     }
+.dataModeReplay { background: rgba(155,135,212,0.12);  color: var(--demonstration); }
+.dataModeNwp    { background: rgba(155,135,212,0.12);  color: var(--nwp);           }
+.dataModeLive   { background: rgba(34,212,154,0.12);   color: var(--real);          }
+
+/* Forecast clock */
+.clock {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
   padding-left: 16px;
   border-left: 1px solid var(--border);
-  min-width: 78px;
 }
 .clockLabel {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
   font-weight: 700;
+  letter-spacing: 0.3px;
+  font-family: var(--mono);
+}
+.clockValue {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
 }
 
-.status {
+/* Status */
+.statusBlock {
   display: flex;
   align-items: center;
   gap: 7px;
   padding-left: 16px;
   border-left: 1px solid var(--border);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .statusDot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--text-faint);
+  flex: 0 0 auto;
+  transition: background var(--transition-base);
 }
-.statusDotOk {
-  background: var(--real);
-  box-shadow: 0 0 8px rgba(34, 230, 163, 0.6);
-}
-.statusDotBusy {
-  background: var(--synthetic);
-  animation: blink 1s ease-in-out infinite;
-}
-.statusDotBad {
-  background: var(--sev-severe);
-}
-@keyframes blink {
-  50% {
-    opacity: 0.35;
-  }
-}
+.statusDotOk   { background: var(--real); }
+.statusDotBusy { animation: blink-dot 1s ease-in-out infinite; background: var(--accent); }
+.statusDotBad  { background: var(--sev-severe); }
+.statusText    { color: var(--text-dim); }

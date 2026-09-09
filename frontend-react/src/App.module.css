@@ -14,31 +14,88 @@
   position: absolute;
   top: 76px;
   bottom: 132px;
-  width: 328px;
-  padding: 14px 14px 18px;
+  width: 320px;
+  z-index: 800;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  z-index: 800;
-}
-.leftPanel {
-  left: 14px;
-}
-.rightPanel {
-  right: 14px;
 }
 
+.leftPanel {
+  left: 14px;
+  padding: 12px 14px 16px;
+  gap: 0;
+}
+
+.rightPanel {
+  right: 14px;
+  padding: 0;        /* tab strip + panels own their own padding */
+  overflow: hidden;  /* clip to rounded corners */
+}
+
+/* ---------------------------------------------------------------- tab strip */
+.tabStrip {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 4px;
+  flex: 0 0 auto;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabStrip::-webkit-scrollbar { display: none; }
+
+.tabBtn {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tabBtn:hover {
+  color: var(--text-dim);
+}
+.tabBtnActive {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- tab panels */
+.tabPanel {
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  padding: 14px 14px 18px;
+  min-height: 0;
+}
+.tabPanelActive {
+  display: flex;
+  animation: fade-in 0.15s ease-out;
+}
+
+/* ---------------------------------------------------------------- responsive */
 @media (max-width: 1500px) {
-  .leftPanel,
-  .rightPanel {
-    width: 284px;
-  }
+  .leftPanel, .rightPanel { width: 284px; }
 }
 
 @media (max-width: 1400px) {
-  .leftPanel,
+  .leftPanel {
+    width: 250px;
+    padding: 10px 10px 14px;
+  }
   .rightPanel {
     width: 250px;
+  }
+  .tabPanel {
     padding: 10px 10px 14px;
   }
 }

@@ -1,6 +1,7 @@
 .section {
-  padding: 12px 2px 16px;
+  padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
 }
 .desc {
   font-size: 11px;
@@ -8,147 +9,180 @@
   margin-top: 8px;
   line-height: 1.5;
 }
-.sourceRow {
+.tagRow {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 8px;
+  gap: 5px;
+  margin-top: 7px;
   flex-wrap: wrap;
 }
 .field {
-  margin-top: 12px;
+  margin-top: 11px;
 }
-.buttons {
+.actions {
   display: flex;
-  gap: 8px;
-  margin-top: 14px;
-}
-.compareNote {
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-  color: var(--synthetic);
-  font-weight: 600;
-}
-.compareNote b {
-  color: var(--sev-severe);
-}
-.runInfo {
+  flex-direction: column;
+  gap: 7px;
   margin-top: 12px;
-  padding: 10px 11px;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid var(--border);
-  font-size: 11px;
-  color: var(--text-dim);
-  line-height: 1.6;
-}
-.runInfo b {
-  color: var(--text);
-  font-family: var(--mono);
-}
-.errBox {
-  margin-top: 10px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 59, 59, 0.1);
-  border: 1px solid rgba(255, 59, 59, 0.35);
-  color: #ffb3b3;
-  font-size: 11px;
 }
 
-/* --- live status indicator (Task 5) --- */
-.liveStatus {
+/* Button loading spinner */
+.btnSpinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 212, 255, 0.25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex: 0 0 auto;
+}
+
+/* Error */
+.errBox {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(224, 64, 64, 0.09);
+  border: 1px solid rgba(224, 64, 64, 0.30);
+  color: #fbb;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* Status indicators (Live / ECMWF) */
+.statusRow {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   margin-top: 8px;
-  padding: 8px 10px;
+  padding: 7px 9px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-surface);
 }
-.liveStatusDot {
-  width: 8px;
-  height: 8px;
+.statusDot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   margin-top: 3px;
   flex: 0 0 auto;
   background: var(--text-faint);
+  transition: background var(--transition-base);
 }
-.liveStatus_ok .liveStatusDot {
-  background: var(--real);
-  box-shadow: 0 0 8px rgba(34, 230, 163, 0.6);
-}
-.liveStatus_bad .liveStatusDot {
-  background: var(--sev-severe);
-}
-.liveStatus_idle .liveStatusDot {
-  background: var(--accent);
-}
-.liveStatusTitle {
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.4px;
-}
-.liveStatus_ok .liveStatusTitle {
-  color: var(--real);
-}
-.liveStatus_bad .liveStatusTitle {
-  color: var(--sev-severe);
-}
-.liveStatus_idle .liveStatusTitle {
-  color: var(--accent);
-}
-.liveStatusSub {
+.statusRow_ok .statusDot  { background: var(--real); }
+.statusRow_bad .statusDot { background: var(--sev-severe); }
+.statusRow_idle .statusDot{ background: var(--accent); }
+.statusTitle {
   font-size: 10.5px;
-  color: var(--text-dim);
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.statusRow_ok .statusTitle  { color: var(--real); }
+.statusRow_bad .statusTitle { color: var(--sev-severe); }
+.statusRow_idle .statusTitle{ color: var(--accent); }
+.statusSub {
+  font-size: 10px;
+  color: var(--text-faint);
   margin-top: 1px;
   line-height: 1.4;
 }
 
-/* --- live provenance block (Task 4/6) --- */
-.liveProv {
-  margin-top: 12px;
-  padding: 10px 11px;
+/* Provenance blocks (live / ECMWF post-run) */
+.provBlock {
+  margin-top: 10px;
+  padding: 9px 11px;
   border-radius: var(--radius-sm);
-  background: rgba(0, 212, 255, 0.05);
-  border: 1px solid rgba(0, 212, 255, 0.25);
+  background: rgba(0, 212, 255, 0.04);
+  border: 1px solid var(--border-accent);
 }
-.liveHeadline {
-  font-size: 11px;
-  font-weight: 700;
+.provHeadline {
+  font-size: 10.5px;
+  font-weight: 600;
   color: var(--accent);
-  margin-bottom: 8px;
+  margin-bottom: 7px;
   line-height: 1.4;
 }
-.liveRow {
+.provRow {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 2px 0;
-  font-size: 11px;
 }
-.liveLabel {
+.provLabel {
   color: var(--text-faint);
-  text-transform: uppercase;
   font-size: 9.5px;
-  letter-spacing: 0.4px;
   font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
   flex: 0 0 auto;
-  padding-top: 1px;
 }
-.liveValue {
+.provValue {
   color: var(--text);
-  text-align: right;
   font-family: var(--mono);
-  font-size: 10.5px;
-}
-.liveNote {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
   font-size: 10px;
+  text-align: right;
+}
+.provNote {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  font-size: 9.5px;
   color: var(--text-faint);
   line-height: 1.5;
 }
+
+/* Run summary */
+.runSummary {
+  margin-top: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.compareNote {
+  padding: 7px 10px;
+  background: rgba(245, 166, 35, 0.07);
+  border-bottom: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--synthetic);
+  line-height: 1.4;
+}
+.compareNote strong { color: var(--sev-severe); }
+.summaryGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.summaryCell {
+  padding: 8px 10px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.summaryCell:nth-child(even) { border-right: none; }
+.summaryCell:nth-child(3),
+.summaryCell:nth-child(4)    { border-bottom: none; }
+.summaryCellLabel {
+  display: block;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.summaryCellValue {
+  display: block;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.1;
+}
+.summaryFooter {
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--bg-surface);
+}
+.summaryFooter strong { color: var(--text-dim); }
+.summaryFooter code  { font-family: var(--mono); color: var(--text-dim); }

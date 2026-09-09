@@ -3,13 +3,13 @@ import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import { fmt } from '../../lib/format.js'
 import styles from './RoutePlanner.module.css'
 
-// Matches the backend's VEHICLE_LIMIT_CM keys (see lib/severity.js's passable() default map / config.py).
+// Matches the backend's VEHICLE_LIMIT_CM keys (see lib/severity.js / config.py).
 const VEHICLES = [
-  { value: 'car', label: 'Car' },
-  { value: 'ambulance', label: 'Ambulance' },
-  { value: 'motorcycle', label: 'Motorcycle' },
-  { value: 'truck', label: 'Truck' },
-  { value: 'pedestrian', label: 'Pedestrian' },
+  { value: 'car', label: 'Car (30 cm limit)' },
+  { value: 'ambulance', label: 'Ambulance (40 cm limit)' },
+  { value: 'motorcycle', label: 'Motorcycle (30 cm limit)' },
+  { value: 'truck', label: 'Truck (60 cm limit)' },
+  { value: 'pedestrian', label: 'Pedestrian (60 cm limit)' },
 ]
 
 function parseLonLat(text) {
@@ -74,11 +74,11 @@ export default function RoutePlanner() {
 
   return (
     <section className={styles.section}>
-      <div className="panel-heading">Flood-safe routing</div>
+      <div className="panel-heading">Emergency Route Assessment</div>
 
       <div className={styles.field}>
         <label className="field-label" htmlFor="rp-vehicle">
-          Vehicle
+          Vehicle type
         </label>
         <select id="rp-vehicle" value={vehicle} onChange={(e) => setRouteVehicle(e.target.value)}>
           {VEHICLES.map((v) => (
@@ -113,11 +113,11 @@ export default function RoutePlanner() {
           onChange={(e) => setDestText(e.target.value)}
         />
       </div>
-      <div className={styles.hint}>Click the map twice (origin, then destination) or type coordinates above.</div>
+      <div className={styles.hint}>Click map twice to pick origin and destination, or type coordinates above.</div>
 
       <div className={styles.buttons}>
         <button className="btn btn-primary btn-block" onClick={handleFind} disabled={route.loading}>
-          {route.loading ? 'Routing…' : 'Find route'}
+          {route.loading ? 'Evaluating route…' : 'Assess safe route'}
         </button>
         <button className="btn" onClick={handleClear}>
           Clear
@@ -129,36 +129,42 @@ export default function RoutePlanner() {
 
       {!result && !route.loading && !route.error && (route.origin || route.dest) && (
         <div className={styles.pickStatus}>
-          {route.origin && !route.dest ? 'Origin set — pick a destination to route.' : 'Ready to route.'}
+          {route.origin && !route.dest ? 'Origin set — click map for destination.' : 'Ready to evaluate route.'}
         </div>
       )}
 
       {unreachable && (
-        <div className={styles.alert} role="alert">
-          <span className={styles.alertIcon} aria-hidden="true">
-            ⚠
-          </span>
-          <div className={styles.alertText}>
-            <div className={styles.alertTitle}>NO SAFE ROUTE AT {Math.round(result.t_min ?? 0)} MIN</div>
-            <div className={styles.alertBody}>
-              ALL AVAILABLE PATHS EXCEED {(result.vehicle || vehicle || '').toUpperCase()} DEPTH LIMIT
-              {result.vehicle_limit_cm != null ? ` (${Math.round(result.vehicle_limit_cm)} CM)` : ''}
-            </div>
+        <div className={styles.alertUnsafe} role="alert">
+          <div className={styles.alertHeader}>
+            <span className={styles.alertBadge}>NO SAFE ROUTE</span>
+            <span className={styles.alertTime}>T+{Math.round(result.t_min ?? 0)}m</span>
+          </div>
+          <div className={styles.alertBody}>
+            All available paths exceed the {result.vehicle || vehicle} depth threshold
+            {result.vehicle_limit_cm != null ? ` (${Math.round(result.vehicle_limit_cm)} cm)` : ''}.
           </div>
         </div>
       )}
 
       {reachableResult && (
         <div className={styles.resultBox}>
+          <div className={styles.resultHeader}>
+            <span className={styles.safeBadge}>SAFE ROUTE FOUND</span>
+            {result.max_depth_on_route_cm != null && result.vehicle_limit_cm != null && (
+              <span className={styles.decisionRule}>
+                {Math.round(result.max_depth_on_route_cm)} cm / {Math.round(result.vehicle_limit_cm)} cm max
+              </span>
+            )}
+          </div>
           <div className={styles.resultRow}>
             <span className={styles.resultLabel}>Safe route distance</span>
             <span className={styles.resultValue}>{fmt(result.length_m, 0)} m</span>
           </div>
           <div className={styles.resultRow}>
-            <span className={styles.resultLabel}>Baseline (unrestricted) distance</span>
+            <span className={styles.resultLabel}>Direct (baseline) distance</span>
             <span className={styles.resultValue}>
               {fmt(result.baseline_length_m, 0)} m
-              {detourM != null ? ` (+${fmt(detourM, 0)} m detour)` : ''}
+              {detourM != null && detourM > 5 ? ` (+${fmt(detourM, 0)} m detour)` : ''}
             </span>
           </div>
           <div className={styles.resultRow}>
@@ -168,14 +174,14 @@ export default function RoutePlanner() {
             </span>
           </div>
           <div className={styles.resultRow}>
-            <span className={styles.resultLabel}>Segments avoided</span>
+            <span className={styles.resultLabel}>Flooded segments avoided</span>
             <span className={styles.resultValue}>
               {avoided.length}
               {avoided.length > 0 && (
                 <span className={styles.avoidedList}>
                   {': '}
-                  {avoidedNames.slice(0, 4).join(', ')}
-                  {avoidedNames.length > 4 ? ` +${avoidedNames.length - 4} more` : ''}
+                  {avoidedNames.slice(0, 3).join(', ')}
+                  {avoidedNames.length > 3 ? ` +${avoidedNames.length - 3} more` : ''}
                 </span>
               )}
             </span>

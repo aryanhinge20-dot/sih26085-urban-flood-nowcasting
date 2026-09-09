@@ -12,12 +12,15 @@ export default function FloodedStreets() {
     .filter((f) => (f.properties?.depth_cm ?? 0) > 0)
     .sort((a, b) => (b.properties?.depth_cm ?? 0) - (a.properties?.depth_cm ?? 0))
   const ranked = flooded.slice(0, TOP_N)
+  const maxDepth = ranked[0]?.properties?.depth_cm || 1
 
   const hasData = Boolean(run && frame)
 
   return (
     <section className={styles.section}>
-      <div className="panel-heading">Top flooded streets</div>
+      <div className="panel-heading">
+        Top flooded streets {flooded.length > 0 && <span className={styles.count}>({flooded.length})</span>}
+      </div>
 
       {!hasData ? (
         <div className={styles.empty}>Run a forecast to see street-level flooding.</div>
@@ -25,9 +28,12 @@ export default function FloodedStreets() {
         <div className={styles.empty}>No street flooding at this timestep.</div>
       ) : (
         <ul className={styles.list}>
-          {ranked.map((f) => {
+          {ranked.map((f, i) => {
             const p = f.properties || {}
             const isSelected = String(p.seg_id) === String(selectedSegId)
+            const depth = p.depth_cm ?? 0
+            const pct = Math.min(100, Math.max(8, Math.round((depth / maxDepth) * 100)))
+
             return (
               <li key={p.seg_id}>
                 <button
@@ -35,6 +41,8 @@ export default function FloodedStreets() {
                   className={`${styles.row} ${isSelected ? styles.rowSelected : ''}`}
                   onClick={() => selectSegment(p.seg_id)}
                 >
+                  <div className={styles.barFill} style={{ width: `${pct}%` }} />
+                  <span className={styles.rank}>#{i + 1}</span>
                   <span className={styles.name}>{p.name || p.seg_id}</span>
                   <SeverityBadge severity={p.severity} depthCm={p.depth_cm} />
                 </button>

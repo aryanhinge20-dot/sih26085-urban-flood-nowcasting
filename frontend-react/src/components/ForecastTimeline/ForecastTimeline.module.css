@@ -2,25 +2,29 @@
   position: absolute;
   left: 14px;
   right: 14px;
-  bottom: 14px;
-  height: 104px;
+  bottom: 12px;
+  height: 110px;
   z-index: 900;
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 10px 20px;
+  padding: 10px 18px;
 }
 
 .playBtn {
-  width: 46px;
-  height: 46px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   flex: 0 0 auto;
-  font-size: 16px;
+  font-size: 15px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.playBtn:hover:not(:disabled) {
+  transform: scale(1.04);
 }
 
 .body {
@@ -35,27 +39,33 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-weight: 700;
 }
+.titleText {
+  color: var(--text-dim);
+}
 .metricLegend {
   text-transform: none;
   letter-spacing: 0;
   font-weight: 500;
-}
-.topRow b {
   color: var(--text-dim);
+}
+.rainSummary {
+  color: var(--text-faint);
   text-transform: none;
   letter-spacing: 0;
-  font-weight: 500;
+  font-family: var(--mono);
+  font-size: 9.5px;
 }
 
 .chartWrap {
   position: relative;
-  height: 52px;
+  height: 44px;
+  margin-top: 2px;
 }
 .chart {
   width: 100%;
@@ -67,38 +77,61 @@
   top: 0;
   bottom: 0;
   right: 0;
-  background: rgba(4, 6, 10, 0.42);
+  background: rgba(4, 6, 10, 0.45);
   pointer-events: none;
-  border-left: 1px dashed rgba(255, 255, 255, 0.25);
+  border-left: 1px dashed rgba(255, 255, 255, 0.3);
 }
 
 .slider {
   width: 100%;
   margin: 2px 0 0;
   accent-color: var(--accent);
+  height: 4px;
+  cursor: pointer;
+}
+
+.ticksRow {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px;
+  margin-top: 2px;
+}
+.tick {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  color: var(--text-faint);
+  transition: color 0.15s ease;
+}
+.tickActive {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .clock {
   flex: 0 0 auto;
-  width: 118px;
+  width: 110px;
   text-align: right;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
 }
 .clockValue {
   font-family: var(--mono);
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 800;
   color: var(--accent);
   line-height: 1;
 }
 .clockUnit {
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 .empty {
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: 11.5px;
+  padding-top: 12px;
+  text-align: center;
 }

@@ -108,6 +108,8 @@ export function FloodNetProvider({ children }) {
 
   const [route, setRoute] = useState(emptyRoute())
   const [layers, setLayers] = useState(DEFAULT_LAYERS)
+  const [terrainOpacity, setTerrainOpacity] = useState(0.40)
+  const [depthOpacity, setDepthOpacity] = useState(0.50)
   const [notice, setNotice] = useState(null) // transient banner {kind:'error'|'info', text}
 
   const notify = useCallback((text, kind = 'error') => {
@@ -427,6 +429,10 @@ export function FloodNetProvider({ children }) {
       pickPoint,
       layers,
       toggleLayer,
+      terrainOpacity,
+      setTerrainOpacity,
+      depthOpacity,
+      setDepthOpacity,
       notice,
       notify,
     }),
@@ -434,7 +440,7 @@ export function FloodNetProvider({ children }) {
       meta, status, provenance, scenarios, currentScenario, scenarioId, blockage, bootLoading, bootError,
       roads, topology, hotspots, terrain, run, compareResult, series, frame, currentT, playing, simulating,
       simStageIdx, simError, liveAttempt, ecmwfAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
-      explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, layers, toggleLayer, notice, notify,
+      explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, layers, toggleLayer, terrainOpacity, depthOpacity, notice, notify,
     ],
   )
 

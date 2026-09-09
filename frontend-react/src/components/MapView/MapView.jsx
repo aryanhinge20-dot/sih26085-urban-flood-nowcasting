@@ -39,7 +39,7 @@ export default function MapView() {
     meta, roads, topology, hotspots, terrain,
     frame, selectedSegId, selectSegment,
     route, pickPoint,
-    layers,
+    layers, terrainOpacity, depthOpacity,
   } = useFloodNet()
 
   // refs mirroring frequently-changing callbacks/values, so the one-time map-init effect's event
@@ -180,17 +180,26 @@ export default function MapView() {
   }, [hotspots])
 
   // ---------------------------------------------------------------- terrain DEM overlay (static)
+  const terrainOverlayRef = useRef(null)
   useEffect(() => {
     const g = groupsRef.current.terrain
     if (!g || !terrain?.png_base64) return
     g.clearLayers()
-    L.imageOverlay('data:image/png;base64,' + terrain.png_base64, bboxToLatLngBounds(terrain.bbox_lonlat), {
-      opacity: 0.4,
+    const overlay = L.imageOverlay('data:image/png;base64,' + terrain.png_base64, bboxToLatLngBounds(terrain.bbox_lonlat), {
+      opacity: terrainOpacity ?? 0.4,
       interactive: false,
     }).addTo(g)
-  }, [terrain])
+    terrainOverlayRef.current = overlay
+  }, [terrain, terrainOpacity])
+
+  useEffect(() => {
+    if (terrainOverlayRef.current) {
+      terrainOverlayRef.current.setOpacity(terrainOpacity ?? 0.4)
+    }
+  }, [terrainOpacity])
 
   // ---------------------------------------------------------------- per-frame: street flooding, depth grid, surcharge, edge util
+  const depthOverlayRef = useRef(null)
   useEffect(() => {
     const map = mapRef.current
     if (!map || !frame) return
@@ -225,13 +234,15 @@ export default function MapView() {
     // depth grid
     const depthG = groupsRef.current.depth
     depthG.clearLayers()
+    depthOverlayRef.current = null
     if (frame.depth_grid?.png_base64) {
       const bbox = frame.depth_grid.bbox_lonlat || meta?.pilot?.bbox_lonlat
       if (bbox) {
-        L.imageOverlay('data:image/png;base64,' + frame.depth_grid.png_base64, bboxToLatLngBounds(bbox), {
-          opacity: 0.5,
+        const overlay = L.imageOverlay('data:image/png;base64,' + frame.depth_grid.png_base64, bboxToLatLngBounds(bbox), {
+          opacity: depthOpacity ?? 0.5,
           interactive: false,
         }).addTo(depthG)
+        depthOverlayRef.current = overlay
       }
     }
 
@@ -262,7 +273,13 @@ export default function MapView() {
         pl.setStyle({ color: `hsl(${hue},85%,${u > 1 ? 42 : 60}%)` })
       })
     }
-  }, [frame, meta])
+  }, [frame, meta, depthOpacity])
+
+  useEffect(() => {
+    if (depthOverlayRef.current) {
+      depthOverlayRef.current.setOpacity(depthOpacity ?? 0.5)
+    }
+  }, [depthOpacity])
 
   // re-highlight the selected segment without waiting for the next frame fetch (e.g. selection made from
   // the FloodedStreets/AlertsPanel/"Top flood priorities" lists rather than a map click), and pan the map
