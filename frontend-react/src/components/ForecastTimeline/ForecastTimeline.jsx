@@ -1,15 +1,22 @@
 import { useCallback, useMemo } from 'react'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
-import { fmtMinutes } from '../../lib/format.js'
 import styles from './ForecastTimeline.module.css'
 
 const W = 1000
-const H = 70
+const H = 68
 
-const TICKS = [0, 30, 60, 90, 120, 150, 180]
+const TICKS = [
+  { t: 0, label: 'NOW' },
+  { t: 15, label: '+15' },
+  { t: 30, label: '+30' },
+  { t: 60, label: '+60' },
+  { t: 90, label: '+90' },
+  { t: 120, label: '+120' },
+  { t: 180, label: '+180 MIN' },
+]
 
 export default function ForecastTimeline() {
-  const { run, currentScenario, series, compareResult, currentT, setCurrentT, playing, setPlaying } = useFloodNet()
+  const { run, series, compareResult, currentT, setCurrentT, playing, setPlaying } = useFloodNet()
 
   const ts = run?.frames_t_min || []
   const tMin = ts.length ? ts[0] : 0
@@ -19,34 +26,83 @@ export default function ForecastTimeline() {
   const x = useCallback((t) => ((t - tMin) / Math.max(1, tMax - tMin)) * W, [tMin, tMax])
   const cursorX = x(currentT)
 
-  const rainPath = useMemo(() => {
-    const sc = currentScenario
-    if (!sc?.t_min?.length) return { bars: [], imax: 0 }
-    const imax = Math.max(1, ...sc.intensity_mm_h)
-    const n = sc.t_min.length
-    const bw = Math.max(1, W / n - 1.5)
-    const bars = sc.t_min.map((t, i) => ({
-      x: ((t - tMin) / Math.max(1, tMax - tMin)) * W,
+  // Sourced from the RUN's own actual per-frame rainfall (series.rain_mm_h, from the real engine frames --
+  // see api/main.py's /series endpoint), never from the static scenario table (`currentScenario`). The
+  // static table only covers the 4 predefined scenarios (moderate/heavy/cloudburst/july2005) -- using it here
+  // left the "Rain input" hyetograph silently EMPTY for live/ECMWF runs, which have no entry in that table
+  // despite the real per-frame rain data existing on every run via `series`.
+  const rainData = useMemo(() => {
+    if (!series?.t_min?.length || !series?.rain_mm_h?.length) return { bars: [], imax: 0, total: 0 }
+    const t = series.t_min
+    const vals = series.rain_mm_h
+    const imax = Math.max(1, ...vals)
+    const n = t.length
+    const bw = Math.max(2, W / n - 1.5)
+    const dtMin = n > 1 ? t[1] - t[0] : step || 5
+    const bars = t.map((tt, i) => ({
+      x: ((tt - tMin) / Math.max(1, tMax - tMin)) * W,
       w: bw,
-      h: (sc.intensity_mm_h[i] / imax) * (H * 0.45),
+      h: (vals[i] / imax) * (H * 0.42),
+      val: vals[i],
+      t: tt,
     }))
-    return { bars, imax, total: sc.total_mm }
-  }, [currentScenario, tMin, tMax])
+    const total = vals.reduce((sum, v) => sum + v * (dtMin / 60), 0)
+    return { bars, imax, total }
+  }, [series, tMin, tMax, step])
 
-  const metricLabel = compareResult ? 'flooded segments' : 'max flood depth (cm)'
   const depthLines = useMemo(() => {
     const lines = []
     if (compareResult) {
       const t = compareResult.t_min || compareResult.frames_t_min
-      lines.push({ t, y: compareResult.normal.flooded_segments, color: '#00d4ff', label: 'normal' })
-      lines.push({ t, y: compareResult.blocked.flooded_segments, color: '#ff3366', label: 'blocked' })
+      lines.push({ t, y: compareResult.normal.flooded_segments, color: '#2563eb', label: 'normal drainage' })
+      lines.push({ t, y: compareResult.blocked.flooded_segments, color: '#ea580c', label: 'blocked drainage' })
     } else if (series) {
-      lines.push({ t: series.t_min, y: series.max_depth_cm, color: '#00d4ff', label: 'max depth' })
+      lines.push({ t: series.t_min, y: series.max_depth_cm, color: '#2563eb', label: 'modeled max depth' })
     }
     return lines
   }, [series, compareResult])
 
   const ymax = Math.max(5, ...depthLines.flatMap((l) => l.y || []))
+
+  // Find Peak Depth and Peak Time from active series
+  const peak = useMemo(() => {
+    if (!series?.max_depth_cm?.length) return null
+    let maxVal = -1
+    let maxIdx = 0
+    for (let i = 0; i < series.max_depth_cm.length; i++) {
+      if (series.max_depth_cm[i] > maxVal) {
+        maxVal = series.max_depth_cm[i]
+        maxIdx = i
+      }
+    }
+    const peakT = series.t_min[maxIdx]
+    return {
+      val: Math.round(maxVal),
+      t: peakT,
+      x: x(peakT),
+      y: H - 4 - (maxVal / ymax) * (H - 14),
+    }
+  }, [series, ymax, x])
+
+  // Dynamic 1-line interpretation strictly derived from model data
+  const interpretation = useMemo(() => {
+    if (!run) return 'Select a scenario and execute forecast to simulate 0–180 min flood response.'
+    if (currentT === 0) return 'T+0 Initial dry baseline condition before runoff accumulation.'
+    if (peak && Math.abs(currentT - peak.t) <= (step || 5)) {
+      return `Peak modeled flood depth of ${peak.val} cm reached at T+${peak.t} min.`
+    }
+    if (peak && currentT < peak.t) {
+      return `Flood depth is increasing towards peak inundation (${peak.val} cm at T+${peak.t} min).`
+    }
+    if (peak && currentT > peak.t && currentT < tMax) {
+      return `Surface water is receding from peak (${peak.val} cm) via gravity drainage.`
+    }
+    if (currentT >= tMax) {
+      return 'Forecast horizon complete (180 min). Residual ponding in low-elevation sumps.'
+    }
+    return `Simulated flood state at T+${currentT} min.`
+  }, [run, currentT, peak, step, tMax])
+
   const toPath = (l) =>
     (l.y || [])
       .map((v, i) => `${i ? 'L' : 'M'}${x(l.t[i])},${H - 4 - (v / ymax) * (H - 14)}`)
@@ -77,27 +133,33 @@ export default function ForecastTimeline() {
 
       <div className={styles.body}>
         <div className={styles.topRow}>
-          <span className={styles.titleText}>
-            0&ndash;180 min forecast timeline
+          <div className={styles.headerLeft}>
+            <span className={styles.titleText}>Forecast Timeline</span>
+            <span className={styles.interpretationText}>&middot; {interpretation}</span>
+          </div>
+
+          <div className={styles.headerRight}>
             {run && (
-              <span className={styles.metricLegend}>
-                {' '}
-                &middot; {metricLabel}
-                {compareResult && (
-                  <>
-                    {' '}
-                    (<span style={{ color: '#00d4ff' }}>&#9679; normal</span> vs{' '}
-                    <span style={{ color: '#ff3366' }}>&#9679; blocked</span>)
-                  </>
+              <div className={styles.legendWrap}>
+                <span className={styles.legendItem}>
+                  <span className={styles.legendBarSample} /> Rain input
+                </span>
+                <span className={styles.legendItem}>
+                  <span className={styles.legendLineSample} /> {compareResult ? 'Normal vs Blocked' : 'Modeled flood depth'}
+                </span>
+                {peak && (
+                  <span className={styles.peakBadge}>
+                    Peak: {peak.val} cm @ T+{peak.t}m
+                  </span>
                 )}
+              </div>
+            )}
+            {rainData.total > 0 && (
+              <span className={styles.rainSummary}>
+                {Math.round(rainData.total)} mm total &middot; {Math.round(rainData.imax)} mm/h peak rain
               </span>
             )}
-          </span>
-          {rainPath.total != null && (
-            <span className={styles.rainSummary}>
-              Rain total: {Math.round(rainPath.total)} mm &middot; Peak: {Math.round(rainPath.imax)} mm/h
-            </span>
-          )}
+          </div>
         </div>
 
         <div className={styles.chartWrap}>
@@ -106,21 +168,23 @@ export default function ForecastTimeline() {
               <svg className={styles.chart} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
                 <defs>
                   <linearGradient id="depthGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#00d4ff" stopOpacity="0.25" />
-                    <stop offset="100%" stopColor="#00d4ff" stopOpacity="0.0" />
+                    <stop offset="0%" stopColor="#2563eb" stopOpacity="0.28" />
+                    <stop offset="100%" stopColor="#2563eb" stopOpacity="0.03" />
                   </linearGradient>
                 </defs>
 
-                {/* Rain bars (hyetograph) */}
-                {rainPath.bars.map((b, i) => (
+                {/* Rain bars (hyetograph) - subtle neutral slate */}
+                {rainData.bars.map((b, i) => (
                   <rect
                     key={i}
                     x={b.x}
-                    y={H * 0.45 - b.h}
+                    y={H * 0.42 - b.h}
                     width={b.w}
                     height={b.h}
-                    fill="#00d4ff"
-                    opacity="0.4"
+                    fill="#94a3b8"
+                    stroke="#64748b"
+                    strokeWidth="0.5"
+                    opacity="0.65"
                     rx="1"
                   />
                 ))}
@@ -131,15 +195,32 @@ export default function ForecastTimeline() {
                     {!compareResult && (
                       <path d={toAreaPath(l)} fill="url(#depthGrad)" />
                     )}
-                    <path d={toPath(l)} fill="none" stroke={l.color} strokeWidth="2.2" strokeLinecap="round" />
+                    <path d={toPath(l)} fill="none" stroke={l.color} strokeWidth="2.4" strokeLinecap="round" />
                   </g>
                 ))}
 
-                {/* Time cursor */}
-                <line x1={cursorX} x2={cursorX} y1="0" y2={H} stroke="#ffffff" strokeWidth="2" opacity="0.9" />
-                <circle cx={cursorX} cy="3" r="3.5" fill="#ffffff" />
+                {/* Peak Depth Marker */}
+                {peak && !compareResult && (
+                  <g className={styles.peakMarkerGroup}>
+                    <line
+                      x1={peak.x}
+                      x2={peak.x}
+                      y1={peak.y}
+                      y2={H}
+                      stroke="#2563eb"
+                      strokeWidth="1.2"
+                      strokeDasharray="3 3"
+                      opacity="0.75"
+                    />
+                    <circle cx={peak.x} cy={peak.y} r="3.5" fill="#2563eb" stroke="#ffffff" strokeWidth="1.5" />
+                  </g>
+                )}
+
+                {/* Active Time cursor */}
+                <line x1={cursorX} x2={cursorX} y1="0" y2={H} stroke="#1d1d1f" strokeWidth="2" opacity="0.9" />
+                <circle cx={cursorX} cy="4" r="4" fill="#2563eb" stroke="#ffffff" strokeWidth="1.5" />
               </svg>
-              <div className={styles.futureShade} style={{ width: `${100 - (cursorX / W) * 100}%` }} />
+              <div className={styles.futureShade} style={{ width: `${Math.max(0, 100 - (cursorX / W) * 100)}%` }} />
             </>
           ) : (
             <div className={styles.empty}>Execute a forecast scenario to view the 0&ndash;180 min timeline</div>
@@ -161,20 +242,28 @@ export default function ForecastTimeline() {
 
         {/* Timeline tick labels */}
         <div className={styles.ticksRow}>
-          {TICKS.map((t) => (
+          {TICKS.map(({ t, label }) => (
             <span
               key={t}
-              className={`${styles.tick} ${Math.abs(t - currentT) < 15 ? styles.tickActive : ''}`}
+              className={`${styles.tick} ${Math.abs(t - currentT) <= 7.5 ? styles.tickActive : ''}`}
             >
-              +{t}m
+              {label}
             </span>
           ))}
         </div>
       </div>
 
       <div className={styles.clock}>
-        <div className={styles.clockValue}>{run ? fmtMinutes(currentT) : '—'}</div>
-        <div className={styles.clockUnit}>{currentT <= 0 ? 'T+0 (Initial)' : 'Simulated Time'}</div>
+        <div className={styles.clockValue}>{run ? `T+${currentT} min` : '—'}</div>
+        <div className={styles.clockUnit}>
+          {!run
+            ? 'No active run'
+            : currentT === 0
+              ? 'T+0 (Baseline dry)'
+              : currentT >= 60
+                ? `${Math.floor(currentT / 60)}h ${String(currentT % 60).padStart(2, '0')}m elapsed`
+                : `${currentT} min elapsed`}
+        </div>
       </div>
     </div>
   )

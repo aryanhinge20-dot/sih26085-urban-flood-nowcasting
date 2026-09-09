@@ -1,34 +1,64 @@
+/* ── Map canvas ──────────────────────────────────────── */
 .mapEl {
   position: absolute;
   inset: 0;
-  background: #0b0f18;
+  background: #EFE9DC;
 }
+
 .mapEl :global(.leaflet-container) {
-  background: #0b0f18;
+  background: #EFE9DC;
   font-family: var(--font);
 }
+
+/* Soft vignette -- just enough to focus the eye toward centre, never dark enough to obscure map content */
+.mapEl::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 500;
+  background: radial-gradient(circle at 50% 50%, transparent 72%, rgba(58, 32, 20, 0.08) 100%);
+}
+
+/* A very light, warm-neutral tint keeps the OSM basemap from clashing with the ivory UI chrome, without
+   darkening or recolouring it the way the previous dark/blue filter did -- the map stays a normal, legible,
+   familiar basemap (Phase 8/9: map is the most colourful surface; UI chrome must not fight it). */
+.mapEl :global(.leaflet-tile-pane) {
+  filter: saturate(0.92) brightness(1.02);
+}
+
+/* Attribution — minimal, light */
 .mapEl :global(.leaflet-control-attribution) {
-  background: rgba(7, 10, 16, 0.75) !important;
+  background: rgba(255, 253, 248, 0.80) !important;
   color: var(--text-faint);
-  font-size: 9.5px;
+  font-size: 9px;
+  border-top-left-radius: 4px;
+  backdrop-filter: blur(8px);
 }
 .mapEl :global(.leaflet-control-attribution a) {
-  color: var(--accent-dim);
+  color: var(--text-faint);
 }
-.mapEl :global(.leaflet-tile-pane) {
-  filter: brightness(0.55) saturate(0.55) contrast(1.08);
-}
+
+/* Tooltips — light glass surface */
 .mapEl :global(.leaflet-tooltip) {
   background: var(--bg-elevated);
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: 6px;
+  box-shadow: var(--shadow-card);
   font-size: 11px;
-  padding: 6px 9px;
+  padding: 7px 11px;
+  line-height: 1.5;
 }
 .mapEl :global(.leaflet-tooltip)::before {
   display: none;
 }
+.mapEl :global(.leaflet-tooltip b) {
+  color: var(--accent-bright);
+  font-family: var(--mono);
+}
+
+/* Route markers */
 .mapEl :global(.route-marker) {
   background: none;
   border: 0;
@@ -42,60 +72,61 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-  border: 2px solid #0b0f18;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.55);
+  border: 2px solid rgba(255,255,255,0.15);
 }
 .mapEl :global(.route-marker-inner span) {
   transform: rotate(45deg);
   font-weight: 800;
   font-size: 11px;
-  color: #0b0f18;
-}
-.mapEl :global(.node-pulse) {
-  animation: pulse 1.1s ease-in-out infinite;
-}
-@keyframes pulse {
-  0%,
-  100% {
-    stroke-opacity: 0.95;
-    stroke-width: 2px;
-  }
-  50% {
-    stroke-opacity: 0.25;
-    stroke-width: 9px;
-  }
+  color: #FFFFFF;
 }
 
+/* Surcharging node pulse */
+.mapEl :global(.node-pulse) {
+  animation: surcharge-pulse 1.2s ease-in-out infinite;
+}
+@keyframes surcharge-pulse {
+  0%, 100% { stroke-opacity: 0.95; stroke-width: 2px; }
+  50%       { stroke-opacity: 0.18; stroke-width: 9px; }
+}
+
+/* ── Flood depth legend ───────────────────────────────── */
 .legend {
-  /* left panel is 250-328px wide (see App.module.css) starting at left:14px -- 360px clears it at every
-     breakpoint without needing a matching media query, so the legend floats on open map, never under the
-     control panel. */
   position: absolute;
-  left: 360px;
-  bottom: 148px;
+  left: 330px;
+  bottom: 134px;
   z-index: 900;
-  padding: 10px 13px;
+  padding: 9px 13px;
   font-size: 10.5px;
   color: var(--text-dim);
+  background: var(--bg-glass);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
   pointer-events: none;
 }
 .legendTitle {
-  font-size: 9.5px;
+  font-size: 8.5px;
   text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 1px;
   color: var(--text-faint);
-  font-weight: 700;
+  font-weight: 800;
   margin-bottom: 6px;
 }
 .legendRow {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   margin-top: 3px;
+  color: var(--text-dim);
+  font-weight: 500;
 }
 .legendSwatch {
-  width: 13px;
-  height: 8px;
+  width: 14px;
+  height: 7px;
   border-radius: 2px;
   flex: 0 0 auto;
 }

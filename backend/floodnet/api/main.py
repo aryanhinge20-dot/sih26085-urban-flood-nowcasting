@@ -29,6 +29,29 @@ app = FastAPI(title="FloodNet API", version="0.1.0",
               description="Urban flood nowcasting for the Mumbai Hindmata/Dadar pilot (SIH26085)")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+def _index_response():
+    idx = config.FRONTEND_DIR / "index.html"
+    if idx.is_file():
+        return FileResponse(str(idx))
+    return JSONResponse({"message": "FloodNet API is running; frontend/index.html not found", "docs": "/docs"})
+
+
+# ----------------------------------------------------------------------------- SPA client-side routes
+# frontend-react/src/App.jsx owns two pushState targets (BASE + '/' for the landing page, BASE + '/dashboard'
+# for the command centre) -- neither is a real file on disk, so the StaticFiles mount below 404s them on a
+# hard refresh or a direct/shared link (Vite's own dev server papers over this via appType:'spa'
+# historyApiFallback; this production server needs the equivalent explicitly). These two exact routes are
+# registered BEFORE the mount so they win route resolution ahead of it, and are the ONLY paths handled this
+# way -- deliberately not a generic "/static/{path:path}" catch-all, which would also swallow 404s for
+# genuinely missing static assets. Registered before /api/*, /docs, /openapi.json are even defined, so those
+# are unaffected either way (different top-level paths, no overlap).
+@app.get("/static/", include_in_schema=False)
+@app.get("/static/dashboard", include_in_schema=False)
+def spa_fallback():
+    return _index_response()
+
+
 if config.FRONTEND_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(config.FRONTEND_DIR)), name="static")
 
@@ -51,10 +74,7 @@ def _f(x) -> float:
 # ----------------------------------------------------------------------------- root / static
 @app.get("/", include_in_schema=False)
 def root():
-    idx = config.FRONTEND_DIR / "index.html"
-    if idx.is_file():
-        return FileResponse(str(idx))
-    return JSONResponse({"message": "FloodNet API is running; frontend/index.html not found", "docs": "/docs"})
+    return _index_response()
 
 
 @app.get("/api/health")

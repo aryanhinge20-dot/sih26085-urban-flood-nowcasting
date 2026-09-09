@@ -1,5 +1,9 @@
+import path from 'path'
+import { fileURLToPath } from 'url'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // Built output is served by the FastAPI backend from /static (see backend/floodnet/config.py::FRONTEND_DIR
 // and backend/floodnet/api/main.py's StaticFiles mount) -- base must match that mount prefix so the built
@@ -7,7 +11,13 @@ import { defineConfig } from 'vite'
 // `npm run dev` talks to a locally running `uvicorn floodnet.api.main:app --port 8000`.
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
   base: '/static/',
+  appType: 'spa',     // enables historyApiFallback for pushState routes in dev
   server: {
     port: 5173,
     proxy: {

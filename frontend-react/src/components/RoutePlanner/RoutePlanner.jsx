@@ -24,7 +24,7 @@ function fmtLonLat(lonlat) {
 }
 
 export default function RoutePlanner() {
-  const { route, planRoute, clearRoute, setRouteVehicle, roads } = useFloodNet()
+  const { route, planRoute, clearRoute, setRouteVehicle, roads, currentT } = useFloodNet()
 
   const [originText, setOriginText] = useState('')
   const [destText, setDestText] = useState('')
@@ -56,7 +56,7 @@ export default function RoutePlanner() {
       return
     }
     setFormError(null)
-    planRoute({ origin, dest, vehicle })
+    planRoute({ origin, dest, vehicle, tMin: currentT })
   }
 
   const handleClear = () => {
@@ -65,6 +65,7 @@ export default function RoutePlanner() {
   }
 
   const result = route.result
+  const evalT = result?.t_min != null ? result.t_min : currentT
   const unreachable = Boolean(result && result.reachable === false)
   const reachableResult = Boolean(result && result.reachable !== false)
 
@@ -91,7 +92,7 @@ export default function RoutePlanner() {
 
       <div className={styles.field}>
         <label className="field-label" htmlFor="rp-origin">
-          Origin (lon,lat)
+          From (lon,lat)
         </label>
         <input
           id="rp-origin"
@@ -103,7 +104,7 @@ export default function RoutePlanner() {
       </div>
       <div className={styles.field}>
         <label className="field-label" htmlFor="rp-dest">
-          Destination (lon,lat)
+          To (lon,lat)
         </label>
         <input
           id="rp-dest"
@@ -113,11 +114,11 @@ export default function RoutePlanner() {
           onChange={(e) => setDestText(e.target.value)}
         />
       </div>
-      <div className={styles.hint}>Click map twice to pick origin and destination, or type coordinates above.</div>
+      <div className={styles.hint}>Click map twice to pick From/To, or type coordinates above. No address search yet — coordinates only.</div>
 
       <div className={styles.buttons}>
         <button className="btn btn-primary btn-block" onClick={handleFind} disabled={route.loading}>
-          {route.loading ? 'Evaluating route…' : 'Assess safe route'}
+          {route.loading ? 'Evaluating route…' : `Assess safe route at T+${currentT} min`}
         </button>
         <button className="btn" onClick={handleClear}>
           Clear
@@ -129,7 +130,7 @@ export default function RoutePlanner() {
 
       {!result && !route.loading && !route.error && (route.origin || route.dest) && (
         <div className={styles.pickStatus}>
-          {route.origin && !route.dest ? 'Origin set — click map for destination.' : 'Ready to evaluate route.'}
+          {route.origin && !route.dest ? 'Origin set — click map for destination.' : `Ready to evaluate route at T+${currentT} min.`}
         </div>
       )}
 
@@ -137,11 +138,11 @@ export default function RoutePlanner() {
         <div className={styles.alertUnsafe} role="alert">
           <div className={styles.alertHeader}>
             <span className={styles.alertBadge}>NO SAFE ROUTE</span>
-            <span className={styles.alertTime}>T+{Math.round(result.t_min ?? 0)}m</span>
+            <span className={styles.alertTime}>ASSESSED AT T+{evalT} MIN</span>
           </div>
           <div className={styles.alertBody}>
             All available paths exceed the {result.vehicle || vehicle} depth threshold
-            {result.vehicle_limit_cm != null ? ` (${Math.round(result.vehicle_limit_cm)} cm)` : ''}.
+            {result.vehicle_limit_cm != null ? ` (${Math.round(result.vehicle_limit_cm)} cm)` : ''} at T+{evalT} min.
           </div>
         </div>
       )}
@@ -149,7 +150,7 @@ export default function RoutePlanner() {
       {reachableResult && (
         <div className={styles.resultBox}>
           <div className={styles.resultHeader}>
-            <span className={styles.safeBadge}>SAFE ROUTE FOUND</span>
+            <span className={styles.safeBadge}>SAFE ROUTE AT T+{evalT} MIN</span>
             {result.max_depth_on_route_cm != null && result.vehicle_limit_cm != null && (
               <span className={styles.decisionRule}>
                 {Math.round(result.max_depth_on_route_cm)} cm / {Math.round(result.vehicle_limit_cm)} cm max
@@ -185,6 +186,10 @@ export default function RoutePlanner() {
                 </span>
               )}
             </span>
+          </div>
+          <div className={styles.trafficNote}>
+            Ranked by flood risk (forecast street depth) + vehicle depth clearance from the actual road
+            network. <strong>Traffic data: not connected</strong> — no live congestion feed is used.
           </div>
         </div>
       )}

@@ -2,15 +2,15 @@ import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import styles from './LayerControl.module.css'
 
 const PRIMARY = [
-  { key: 'streets',  label: 'Street flooding',              color: '#e87c2a' },
-  { key: 'depth',    label: 'Flood depth grid',              color: '#00d4ff' },
-  { key: 'hotspots', label: 'Known flood spots (MCGM)',      color: '#e87c2a' },
-  { key: 'route',    label: 'Emergency route',               color: '#22d49a' },
+  { key: 'streets',  label: 'Street flooding',              color: '#ea580c' },
+  { key: 'depth',    label: 'Flood depth grid',              color: '#c58a3d' },
+  { key: 'hotspots', label: 'Known flood spots (MCGM)',      color: '#d97706' },
+  { key: 'route',    label: 'Emergency route',               color: '#22c55e' },
 ]
 const TECHNICAL = [
-  { key: 'roads',    label: 'Road network (OSM)',            color: '#52606f' },
-  { key: 'drainage', label: 'Drainage network',              color: '#3aa0ff' },
-  { key: 'terrain',  label: 'Terrain elevation (DEM)',       color: '#9b87d4' },
+  { key: 'roads',    label: 'Road network (OSM)',            color: '#817d73' },
+  { key: 'drainage', label: 'Drainage network',              color: '#1e5550' },
+  { key: 'terrain',  label: 'Terrain elevation (DEM)',       color: '#8a7a99' },
 ]
 
 export default function LayerControl() {

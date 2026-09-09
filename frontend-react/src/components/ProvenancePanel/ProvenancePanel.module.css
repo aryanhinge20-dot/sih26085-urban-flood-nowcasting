@@ -5,9 +5,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: 11.5px;
   text-transform: uppercase;
-  letter-spacing: 1.1px;
+  letter-spacing: 0.8px;
   color: var(--accent);
   font-weight: 700;
   cursor: pointer;
@@ -29,10 +29,10 @@
   margin-top: 10px;
 }
 .empty {
-  padding: 12px;
+  padding: 14px 12px;
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px dashed var(--border-strong);
+  background: var(--bg-surface);
+  border: 1px dashed var(--border);
   color: var(--text-dim);
   font-size: 12px;
   text-align: center;
@@ -40,7 +40,7 @@
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: 11.5px;
 }
 .table tr {
   border-top: 1px solid var(--border);
@@ -49,7 +49,7 @@
   border-top: none;
 }
 .table td {
-  padding: 7px 4px;
+  padding: 8px 4px;
   vertical-align: top;
 }
 .labelCell {
@@ -58,7 +58,8 @@
 .labelText {
   font-family: var(--mono);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 10.5px;
+  font-weight: 600;
   margin-bottom: 3px;
   word-break: break-word;
   white-space: normal;
@@ -77,7 +78,7 @@
   margin-top: 14px;
 }
 .groupLabel {
-  font-size: 9.5px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--text-faint);
@@ -90,17 +91,17 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 .providerRow {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   flex-wrap: wrap;
-  font-size: 11px;
-  padding: 5px 7px;
+  font-size: 11.5px;
+  padding: 7px 9px;
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-surface);
   border: 1px solid var(--border);
 }
 .providerId {
@@ -114,7 +115,7 @@
 }
 .attribution {
   margin-top: 12px;
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--text-faint);
   line-height: 1.5;
 }
@@ -122,7 +123,7 @@
   margin-top: 14px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--text-faint);
   line-height: 1.5;
 }

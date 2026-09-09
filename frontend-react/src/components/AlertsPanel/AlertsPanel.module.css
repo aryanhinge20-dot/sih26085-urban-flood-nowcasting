@@ -1,97 +1,109 @@
+/* ── Incident advisories panel ────────────────────────── */
 .section {
-  padding: 12px 2px 16px;
+  padding: 10px 2px 14px;
   border-bottom: 1px solid var(--border);
 }
+
 .count {
   font-family: var(--mono);
-  color: var(--text-dim);
-  font-weight: 600;
-  font-size: 11px;
+  color: var(--text-faint);
+  font-weight: 700;
+  font-size: 10px;
 }
+
 .empty {
   font-size: 11px;
   color: var(--text-faint);
-  margin-top: 8px;
+  margin-top: 7px;
   line-height: 1.5;
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: var(--radius-sm);
+  padding: 10px 11px;
+  background: rgba(255,255,255,0.025);
+  border-radius: var(--radius-xs);
+  border: 1px dashed var(--border);
 }
+
 .disclaimer {
   font-size: 9.5px;
   color: var(--text-faint);
   margin-top: 10px;
   line-height: 1.4;
-  padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  background: rgba(255,255,255,0.02);
+  border-radius: var(--radius-xs);
   border-left: 2px solid var(--border-strong);
 }
 
+/* ── Alert list ───────────────────────────────────────── */
 .list {
   list-style: none;
-  margin-top: 8px;
+  margin-top: 7px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
+
 .alert {
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   border: 1px solid var(--border);
   border-left: 3px solid var(--border);
-  background: rgba(255, 255, 255, 0.025);
-  padding: 8px 10px;
+  background: rgba(255,255,255,0.025);
+  padding: 9px 11px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
 }
 .alert:hover {
   background: var(--bg-hover);
 }
+
 .alertHead {
   display: flex;
   align-items: center;
   gap: 7px;
 }
+
 .icon {
   font-size: 12px;
   flex: 0 0 auto;
 }
+
 .tierTag {
   font-size: 9px;
   font-weight: 800;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   text-transform: uppercase;
 }
+
 .stateTag {
   margin-left: auto;
   font-size: 9px;
   font-weight: 700;
   color: var(--text-faint);
-  letter-spacing: 0.4px;
+  letter-spacing: 0.5px;
   display: flex;
   align-items: center;
   gap: 4px;
 }
-.stateTag_ACTIVE {
-  color: var(--sev-severe);
-}
+.stateTag_ACTIVE { color: var(--sev-severe); }
+
 .activeDot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--sev-severe);
   display: inline-block;
-  animation: alertPulse 1.5s infinite;
+  animation: alert-pulse 1.8s ease infinite;
 }
-@keyframes alertPulse {
+@keyframes alert-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
+  50%       { opacity: 0.35; transform: scale(0.75); }
 }
 
 .body {
-  margin-top: 6px;
+  margin-top: 5px;
   font-size: 11px;
   color: var(--text-dim);
   line-height: 1.45;
@@ -100,12 +112,44 @@
   color: var(--text);
   font-family: var(--mono);
 }
+
+/* ── Alert context data row ───────────────────────────── */
+.alertContextRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.025);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+}
+.alertContextCol {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.alertContextLabel {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+.alertContextVal {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ── Recommended actions ──────────────────────────────── */
 .actions {
   margin-top: 7px;
   padding-top: 6px;
   border-top: 1px solid var(--border);
   font-size: 10px;
-  color: var(--text-dim);
+  color: var(--text-faint);
   line-height: 1.5;
 }
 .actionsHeader {
@@ -113,36 +157,33 @@
   color: var(--text-faint);
   margin-bottom: 3px;
   text-transform: uppercase;
-  font-size: 9px;
-  letter-spacing: 0.4px;
+  font-size: 8.5px;
+  letter-spacing: 0.5px;
 }
-.actionLine {
-  margin-top: 2px;
-}
+.actionLine { margin-top: 1px; }
 
-.priorityHeading {
-  margin-top: 16px;
-}
+/* ── Priority hotspots list ───────────────────────────── */
+.priorityHeading { margin-top: 14px; }
+
 .priorityList {
   list-style: none;
-  margin-top: 8px;
+  margin-top: 6px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 .priorityRow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: var(--radius-sm);
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   font-size: 11px;
-  transition: background 0.15s ease;
+  transition: background var(--transition-fast);
 }
-.priorityRow:hover {
-  background: var(--bg-hover);
-}
+.priorityRow:hover { background: var(--bg-hover); }
+
 .priorityRank {
   font-family: var(--mono);
   color: var(--text-faint);
@@ -156,13 +197,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
+  color: var(--text-dim);
+  font-weight: 600;
 }
 .priorityCat {
   font-size: 8.5px;
   font-weight: 800;
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   flex: 0 0 auto;
   text-transform: uppercase;
 }

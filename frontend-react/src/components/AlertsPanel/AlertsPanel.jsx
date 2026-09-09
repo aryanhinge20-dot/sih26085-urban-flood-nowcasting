@@ -84,6 +84,20 @@ export default function AlertsPanel() {
                   </span>
                 </div>
                 <div className={styles.body}>{describeAlert(a)}</div>
+                <div className={styles.alertContextRow}>
+                  <div className={styles.alertContextCol}>
+                    <span className={styles.alertContextLabel}>CURRENT (T+{currentT}m)</span>
+                    <span className={styles.alertContextVal}>
+                      {a.currentValue != null && a.currentValue > 0 ? `${Math.round(a.currentValue)} ${a.unit || ''}` : 'Nominal / Dry'}
+                    </span>
+                  </div>
+                  <div className={styles.alertContextCol}>
+                    <span className={styles.alertContextLabel}>FORECAST PEAK</span>
+                    <span className={styles.alertContextVal}>
+                      {Math.round(a.peakValue)} {a.unit || ''} @ T+{Math.round(a.peakTMin)}m
+                    </span>
+                  </div>
+                </div>
                 {(a.tier === 'CRITICAL' || a.tier === 'SEVERE') && recommendedActions(a).length > 0 && (
                   <div className={styles.actions}>
                     <div className={styles.actionsHeader}>Recommended operator actions:</div>

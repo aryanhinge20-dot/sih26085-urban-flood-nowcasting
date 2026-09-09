@@ -76,8 +76,8 @@ export function FloodNetProvider({ children }) {
   const [hotspots, setHotspots] = useState(null)
   const [terrain, setTerrain] = useState(null)
 
-  const [scenarioId, setScenarioId] = useState(null)
-  const [blockage, setBlockage] = useState({ mode: 'none' })
+  const [scenarioId, setScenarioIdState] = useState(null)
+  const [blockage, setBlockageState] = useState({ mode: 'none' })
 
   const [run, setRun] = useState(null) // last simulate/getRun summary
   const [compareResult, setCompareResult] = useState(null)
@@ -86,6 +86,42 @@ export function FloodNetProvider({ children }) {
   const [frame, setFrame] = useState(null)
   const [currentT, setCurrentT] = useState(0)
   const [playing, setPlaying] = useState(false)
+
+  // Invalidate any active run when simulation inputs (scenario, blockage) change
+  const setScenarioId = useCallback((newId) => {
+    setScenarioIdState(newId)
+    setRun(null)
+    setFrame(null)
+    setSeries(null)
+    setCompareResult(null)
+    framesRef.current = new Map()
+    setSelectedSegId(null)
+    setExplain(null)
+    setCurrentT(0)
+    setPlaying(false)
+    setRoute(emptyRoute())
+  }, [])
+
+  const setBlockage = useCallback((newBlockage) => {
+    setBlockageState(newBlockage)
+    setRun(null)
+    setFrame(null)
+    setSeries(null)
+    setCompareResult(null)
+    framesRef.current = new Map()
+    setSelectedSegId(null)
+    setExplain(null)
+    setCurrentT(0)
+    setPlaying(false)
+    setRoute(emptyRoute())
+  }, [])
+
+  const isStale = useMemo(() => {
+    if (!run) return false
+    if (run.scenario_id !== scenarioId) return true
+    if (JSON.stringify(run.blockage ?? { mode: 'none' }) !== JSON.stringify(blockage ?? { mode: 'none' })) return true
+    return false
+  }, [run, scenarioId, blockage])
 
   const [simulating, setSimulating] = useState(false)
   const [simStageIdx, setSimStageIdx] = useState(0)
@@ -347,10 +383,10 @@ export function FloodNetProvider({ children }) {
 
   // ---------------------------------------------------------------- routing
   const planRoute = useCallback(
-    async ({ origin, dest, vehicle }) => {
+    async ({ origin, dest, vehicle, tMin = currentT }) => {
       setRoute((r) => ({ ...r, origin, dest, vehicle, loading: true, error: null }))
       try {
-        const result = await api.findRoute({ origin, dest, vehicle, tMin: currentT, runId: run?.run_id ?? null })
+        const result = await api.findRoute({ origin, dest, vehicle, tMin, runId: run?.run_id ?? null })
         setRoute({ origin, dest, vehicle, result, error: null, loading: false })
       } catch (e) {
         setRoute({ origin, dest, vehicle, result: null, error: e.message, loading: false })
@@ -359,6 +395,15 @@ export function FloodNetProvider({ children }) {
     [currentT, run],
   )
   const clearRoute = useCallback(() => setRoute(emptyRoute()), [])
+
+  // Automatically re-evaluate route when timeline moves, if an active route was already evaluated
+  useEffect(() => {
+    if (route.origin && route.dest && run && !route.loading) {
+      if (route.result && route.result.t_min !== currentT) {
+        planRoute({ origin: route.origin, dest: route.dest, vehicle: route.vehicle, tMin: currentT })
+      }
+    }
+  }, [currentT, run, route.origin, route.dest, route.vehicle, route.result, route.loading, planRoute])
 
   /** RoutePlanner's vehicle selector writes here directly (no local component state) so a map click
    * (Context.pickPoint, below) always uses whatever vehicle is currently selected in the panel, rather than
@@ -375,11 +420,11 @@ export function FloodNetProvider({ children }) {
         if (!r.origin || r.dest) return { ...emptyRoute(), origin: lonlat, vehicle: r.vehicle }
         const vehicle = r.vehicle
         const origin = r.origin
-        planRoute({ origin, dest: lonlat, vehicle })
+        planRoute({ origin, dest: lonlat, vehicle, tMin: currentT })
         return { ...r, dest: lonlat }
       })
     },
-    [planRoute],
+    [planRoute, currentT],
   )
 
   const toggleLayer = useCallback((key) => setLayers((l) => ({ ...l, [key]: !l[key] })), [])
@@ -395,6 +440,7 @@ export function FloodNetProvider({ children }) {
       setScenarioId,
       blockage,
       setBlockage,
+      isStale,
       bootLoading,
       bootError,
       roads,
@@ -437,7 +483,7 @@ export function FloodNetProvider({ children }) {
       notify,
     }),
     [
-      meta, status, provenance, scenarios, currentScenario, scenarioId, blockage, bootLoading, bootError,
+      meta, status, provenance, scenarios, currentScenario, scenarioId, setScenarioId, blockage, setBlockage, isStale, bootLoading, bootError,
       roads, topology, hotspots, terrain, run, compareResult, series, frame, currentT, playing, simulating,
       simStageIdx, simError, liveAttempt, ecmwfAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
       explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, layers, toggleLayer, terrainOpacity, depthOpacity, notice, notify,

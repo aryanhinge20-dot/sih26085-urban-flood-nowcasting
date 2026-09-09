@@ -8,9 +8,7 @@ import styles from './MapView.module.css'
 
 const PILOT_CENTER = [19.02, 72.845]
 
-// Internal Leaflet layer groups. `drainage` (nodes+edges+surcharge together) is the single "Drainage
-// Network" toggle from the product spec -- individual nodes/edges are never separately switchable, and are
-// OFF by default (see FloodNetContext DEFAULT_LAYERS). Everything else maps 1:1 to a Context layer key.
+// Internal Leaflet layer groups.
 const GROUP_KEYS = ['roads', 'drainageEdges', 'drainageNodes', 'drainageSurcharge', 'hotspots', 'terrain', 'depth', 'streets', 'route']
 const VISIBILITY_FOR = (layers) => ({
   roads: layers.roads,
@@ -30,10 +28,11 @@ export default function MapView() {
   const groupsRef = useRef({})
   const svgRendererRef = useRef(null)
   const roadIndexRef = useRef(new Map())
-  const edgeIndexRef = useRef(new Map()) // edge_id -> polyline (restyled per frame, never recreated)
-  const segIndexRef = useRef(new Map()) // seg_id -> polyline (recreated per frame)
+  const edgeIndexRef = useRef(new Map())
+  const segIndexRef = useRef(new Map())
   const routeMarkersRef = useRef([])
   const boundsFittedRef = useRef(false)
+  const fittedRouteKeyRef = useRef(null)
 
   const {
     meta, roads, topology, hotspots, terrain,
@@ -42,10 +41,6 @@ export default function MapView() {
     layers, terrainOpacity, depthOpacity,
   } = useFloodNet()
 
-  // refs mirroring frequently-changing callbacks/values, so the one-time map-init effect's event
-  // listeners always see the latest without needing to be re-bound (which would mean removing/re-adding
-  // a click handler on the Leaflet map on every render -- wasteful and easy to get wrong). Updated in an
-  // effect (runs after render, every render) rather than inline during the render body.
   const pickPointRef = useRef(pickPoint)
   const selectSegmentRef = useRef(selectSegment)
   const selectedSegIdRef = useRef(selectedSegId)
@@ -57,17 +52,13 @@ export default function MapView() {
 
   // ---------------------------------------------------------------- init (once)
   useEffect(() => {
-    // No corner is free for Leaflet's default zoom control: header/left-panel/right-panel/timeline hug all
-    // four edges (see App.module.css), and Leaflet's own control container is z-index 1000 (leaflet.css),
-    // above every panel here (800-900) -- a corner control would visibly float on top of the timeline or
-    // header. Scroll-to-zoom and drag-to-pan remain fully enabled without it.
     const map = L.map(elRef.current, { zoomControl: false, preferCanvas: true }).setView(PILOT_CENTER, 15)
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map)
 
-    svgRendererRef.current = L.svg() // SVG renderer so the surcharge-pulse CSS animation works (default is canvas)
+    svgRendererRef.current = L.svg()
 
     const groups = Object.fromEntries(GROUP_KEYS.map((k) => [k, L.layerGroup().addTo(map)]))
     groupsRef.current = groups
@@ -101,12 +92,12 @@ export default function MapView() {
     if (!map || !meta?.pilot?.bbox_lonlat || boundsFittedRef.current) return
     const bounds = bboxToLatLngBounds(meta.pilot.bbox_lonlat)
     map.fitBounds(bounds)
-    L.rectangle(bounds, { color: '#00d4ff', weight: 1, dashArray: '4 5', fill: false, interactive: false }).addTo(map)
+    L.rectangle(bounds, { color: '#94a3b8', weight: 1.5, dashArray: '4 5', fill: false, interactive: false }).addTo(map)
     if (Array.isArray(meta.attribution)) meta.attribution.forEach((a) => map.attributionControl.addAttribution(a))
     boundsFittedRef.current = true
   }, [meta])
 
-  // ---------------------------------------------------------------- roads (static, subdued)
+  // ---------------------------------------------------------------- roads (static, neutral)
   useEffect(() => {
     const g = groupsRef.current.roads
     if (!g || !roads) return
@@ -114,9 +105,9 @@ export default function MapView() {
     roadIndexRef.current.clear()
     for (const f of roads.features || []) {
       const pl = L.polyline((f.geometry.coordinates || []).map(lonLatToLatLng), {
-        color: '#4b5568',
-        weight: 1.1,
-        opacity: 0.5,
+        color: '#94a3b8',
+        weight: 1.2,
+        opacity: 0.55,
         interactive: false,
       })
       roadIndexRef.current.set(f.properties.seg_id, pl)
@@ -135,8 +126,8 @@ export default function MapView() {
     const caps = (topology.edges || []).map((e) => e.capacity_m3s || 0)
     const cmax = Math.max(1e-6, ...caps)
     for (const e of topology.edges || []) {
-      const w = 0.8 + 3 * Math.sqrt((e.capacity_m3s || 0) / cmax)
-      const pl = L.polyline((e.geom || []).map(lonLatToLatLng), { color: '#3aa0ff', weight: w, opacity: 0.6 })
+      const w = 1.0 + 3 * Math.sqrt((e.capacity_m3s || 0) / cmax)
+      const pl = L.polyline((e.geom || []).map(lonLatToLatLng), { color: '#0d9488', weight: w, opacity: 0.75 })
       pl.bindTooltip(
         `<b>Drain ${e.id}</b><br>${e.shape || ''} ${(e.width_m ?? 0).toFixed(2)}&times;${(e.height_m ?? 0).toFixed(2)} m` +
           `<br>capacity ${(e.capacity_m3s ?? 0).toFixed(2)} m&sup3;/s &middot; status ${e.status || ''}` +
@@ -147,8 +138,8 @@ export default function MapView() {
     }
     for (const n of topology.nodes || []) {
       const m = n.is_outfall
-        ? L.rectangle([[n.lat - 3e-5, n.lon - 3e-5], [n.lat + 3e-5, n.lon + 3e-5]], { color: '#22e6a3', weight: 2, fillOpacity: 0.5 })
-        : L.circleMarker([n.lat, n.lon], { radius: 2.2, color: '#7ec8ff', weight: 1, fillOpacity: 0.5 })
+        ? L.rectangle([[n.lat - 3e-5, n.lon - 3e-5], [n.lat + 3e-5, n.lon + 3e-5]], { color: '#059669', weight: 2, fillOpacity: 0.6 })
+        : L.circleMarker([n.lat, n.lon], { radius: 2.5, color: '#0284c7', weight: 1, fillOpacity: 0.6 })
       m.bindTooltip(`<b>${n.is_outfall ? 'Outfall' : 'Node'} ${n.id}</b><br>ground ${(n.ground_m ?? 0).toFixed(2)} m &middot; invert ${(n.invert_m ?? 0).toFixed(2)} m`)
       m.addTo(nodesG)
     }
@@ -165,11 +156,11 @@ export default function MapView() {
       const p = f.properties || {}
       const active = p.active !== false
       const m = L.circleMarker([lat, lon], {
-        radius: 7,
-        color: '#ff8c1a',
+        radius: 6,
+        color: '#d97706',
         weight: 2,
-        fillColor: '#ff8c1a',
-        fillOpacity: active ? 0.75 : 0.12,
+        fillColor: '#f59e0b',
+        fillOpacity: active ? 0.8 : 0.2,
       })
       m.bindTooltip(
         `<b>${p.name || 'Flooding spot'}</b><br>ward ${p.ward || ''} &middot; ${p.affect_road || ''}` +
@@ -186,7 +177,7 @@ export default function MapView() {
     if (!g || !terrain?.png_base64) return
     g.clearLayers()
     const overlay = L.imageOverlay('data:image/png;base64,' + terrain.png_base64, bboxToLatLngBounds(terrain.bbox_lonlat), {
-      opacity: terrainOpacity ?? 0.4,
+      opacity: terrainOpacity ?? 0.35,
       interactive: false,
     }).addTo(g)
     terrainOverlayRef.current = overlay
@@ -194,7 +185,7 @@ export default function MapView() {
 
   useEffect(() => {
     if (terrainOverlayRef.current) {
-      terrainOverlayRef.current.setOpacity(terrainOpacity ?? 0.4)
+      terrainOverlayRef.current.setOpacity(terrainOpacity ?? 0.35)
     }
   }, [terrainOpacity])
 
@@ -204,31 +195,52 @@ export default function MapView() {
     const map = mapRef.current
     if (!map || !frame) return
 
-    // streets
+    // streets: reuse existing polylines via diffing to eliminate 900+ polyline recreation churn
     const streetsG = groupsRef.current.streets
-    streetsG.clearLayers()
-    segIndexRef.current.clear()
+    const currentMap = segIndexRef.current
+    const activeSegIds = new Set()
     const feats = frame.streets?.features || []
+
     for (const f of feats) {
       const p = f.properties || {}
       const d = p.depth_cm || 0
-      if (d < 1) continue // don't clutter the map with essentially-dry segments
+      if (d < 1) continue
+      const segIdStr = String(p.seg_id)
+      activeSegIds.add(segIdStr)
+
       const sev = p.severity || severityOf(d, DEFAULT_BANDS_CM)
-      const isSelected = String(p.seg_id) === String(selectedSegIdRef.current)
-      const pl = L.polyline((f.geometry.coordinates || []).map(lonLatToLatLng), {
-        color: isSelected ? '#ffffff' : severityColor(sev),
-        weight: isSelected ? 7 : 2.5 + Math.min(7, d / 9),
-        opacity: isSelected ? 1 : 0.92,
-      })
-      pl.bindTooltip(
-        `<b>${p.name || p.seg_id}</b><br>${Math.round(d)} cm &middot; ${SEVERITY_LABEL[sev] || sev}` +
-          `<br>car ${p.passable_car ? 'passable' : 'BLOCKED'} &middot; ambulance ${p.passable_ambulance ? 'passable' : 'BLOCKED'}`,
-      )
-      pl.on('click', () => selectSegmentRef.current(p.seg_id))
-      pl.on('mouseover', () => pl.setStyle({ weight: (isSelected ? 7 : 2.5 + Math.min(7, d / 9)) + 2 }))
-      pl.on('mouseout', () => pl.setStyle({ weight: isSelected ? 7 : 2.5 + Math.min(7, d / 9) }))
-      segIndexRef.current.set(String(p.seg_id), pl)
-      pl.addTo(streetsG)
+      const isSelected = segIdStr === String(selectedSegIdRef.current)
+      const color = isSelected ? '#1d1d1f' : severityColor(sev)
+      const weight = isSelected ? 7 : 2.8 + Math.min(6, d / 10)
+      const opacity = isSelected ? 1 : 0.95
+      const tooltipContent = `<b>${p.name || p.seg_id}</b><br>${Math.round(d)} cm &middot; ${SEVERITY_LABEL[sev] || sev}` +
+        `<br>car ${p.passable_car ? 'passable' : 'BLOCKED'} &middot; ambulance ${p.passable_ambulance ? 'passable' : 'BLOCKED'}`
+
+      const existingPl = currentMap.get(segIdStr)
+      if (existingPl) {
+        existingPl.setStyle({ color, weight, opacity })
+        existingPl.setTooltipContent(tooltipContent)
+      } else {
+        const pl = L.polyline((f.geometry.coordinates || []).map(lonLatToLatLng), {
+          color,
+          weight,
+          opacity,
+        })
+        pl.bindTooltip(tooltipContent)
+        pl.on('click', () => selectSegmentRef.current(p.seg_id))
+        pl.on('mouseover', () => pl.setStyle({ weight: (isSelected ? 7 : 2.8 + Math.min(6, d / 10)) + 2 }))
+        pl.on('mouseout', () => pl.setStyle({ weight: isSelected ? 7 : 2.8 + Math.min(6, d / 10) }))
+        currentMap.set(segIdStr, pl)
+        pl.addTo(streetsG)
+      }
+    }
+
+    // Prune polylines that have receded to 0 depth
+    for (const [segIdStr, pl] of currentMap.entries()) {
+      if (!activeSegIds.has(segIdStr)) {
+        streetsG.removeLayer(pl)
+        currentMap.delete(segIdStr)
+      }
     }
 
     // depth grid
@@ -246,17 +258,17 @@ export default function MapView() {
       }
     }
 
-    // surcharging nodes (part of the "Drainage Network" toggle group)
+    // surcharging nodes
     const surchG = groupsRef.current.drainageSurcharge
     surchG.clearLayers()
     for (const n of frame.nodes || []) {
       if (!n.surcharging) continue
       const m = L.circleMarker([n.lat, n.lon], {
         radius: 6,
-        color: '#ff3366',
+        color: '#dc2626',
         weight: 2,
-        fillColor: '#ff3366',
-        fillOpacity: 0.6,
+        fillColor: '#ef4444',
+        fillOpacity: 0.75,
         className: 'node-pulse',
         renderer: svgRendererRef.current,
       })
@@ -264,13 +276,13 @@ export default function MapView() {
       m.addTo(surchG)
     }
 
-    // recolour the (persistent) drainage edges by utilisation
+    // recolour the drainage edges by utilisation
     if (frame.edges?.length) {
       const util = new Map(frame.edges.map((e) => [e.id, e.util || 0]))
       edgeIndexRef.current.forEach((pl, id) => {
         const u = Math.max(0, Math.min(1.2, util.get(id) ?? 0))
-        const hue = 210 - 210 * Math.min(1, u)
-        pl.setStyle({ color: `hsl(${hue},85%,${u > 1 ? 42 : 60}%)` })
+        const hue = 200 - 200 * Math.min(1, u)
+        pl.setStyle({ color: `hsl(${hue},85%,${u > 1 ? 40 : 50}%)` })
       })
     }
   }, [frame, meta, depthOpacity])
@@ -281,15 +293,13 @@ export default function MapView() {
     }
   }, [depthOpacity])
 
-  // re-highlight the selected segment without waiting for the next frame fetch (e.g. selection made from
-  // the FloodedStreets/AlertsPanel/"Top flood priorities" lists rather than a map click), and pan the map
-  // to it -- "jump to the relevant map location" for alert/priority clicks.
+  // Re-highlight selected segment
   useEffect(() => {
     const map = mapRef.current
     let selectedLayer = null
     segIndexRef.current.forEach((pl, segId) => {
       const isSelected = String(segId) === String(selectedSegId)
-      pl.setStyle({ color: isSelected ? '#ffffff' : pl.options.color, weight: isSelected ? 7 : pl.options.weight })
+      pl.setStyle({ color: isSelected ? '#1d1d1f' : pl.options.color, weight: isSelected ? 7 : pl.options.weight })
       if (isSelected) {
         pl.bringToFront()
         selectedLayer = pl
@@ -299,7 +309,7 @@ export default function MapView() {
       try {
         map.fitBounds(selectedLayer.getBounds().pad(0.6), { maxZoom: 17 })
       } catch {
-        /* degenerate (single-point) geometry -- ignore, highlighting already happened */
+        /* ignore */
       }
     }
   }, [selectedSegId])
@@ -323,26 +333,41 @@ export default function MapView() {
       routeMarkersRef.current.push(m)
     }
 
-    if (route.origin) addMarker(route.origin, 'A', '#22e6a3')
-    if (route.dest) addMarker(route.dest, 'B', route.result?.reachable === false ? '#ff3366' : '#00d4ff')
+    if (route.origin) addMarker(route.origin, 'A', '#16a34a')
+    if (route.dest) addMarker(route.dest, 'B', route.result?.reachable === false ? '#dc2626' : '#2563eb')
 
     const r = route.result
     if (r?.baseline_route) {
-      L.geoJSON(r.baseline_route, { style: { color: '#9ca3af', weight: 3, dashArray: '5 7', opacity: 0.8 } }).addTo(g)
+      L.geoJSON(r.baseline_route, { style: { color: 'rgba(148, 163, 184, 0.45)', weight: 2.5, dashArray: '4 6', opacity: 0.65 } }).addTo(g)
     }
+
+    const routeKey = route.origin && route.dest ? `${route.origin.join(',')}|${route.dest.join(',')}` : null
+
     if (r?.route && r.reachable !== false) {
-      const gj = L.geoJSON(r.route, { style: { color: '#22e6a3', weight: 5, opacity: 0.95 } }).addTo(g)
-      try {
-        map.fitBounds(gj.getBounds().pad(0.35))
-      } catch {
-        /* empty geometry -- ignore */
+      const gj = L.geoJSON(r.route, { style: { color: '#22c55e', weight: 6, opacity: 0.98 } }).addTo(g)
+      if (routeKey && routeKey !== fittedRouteKeyRef.current) {
+        try {
+          map.fitBounds(gj.getBounds().pad(0.35), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
+          fittedRouteKeyRef.current = routeKey
+        } catch {
+          /* ignore */
+        }
       }
+    } else if (route.origin && route.dest && routeKey && routeKey !== fittedRouteKeyRef.current) {
+      try {
+        const bounds = L.latLngBounds([lonLatToLatLng(route.origin), lonLatToLatLng(route.dest)])
+        map.fitBounds(bounds.pad(0.4), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
+        fittedRouteKeyRef.current = routeKey
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!route.origin && !route.dest) {
+      fittedRouteKeyRef.current = null
     }
   }, [route])
 
-  // legend rows: DEFAULT_BANDS_CM is [[5,'clear'],[15,'minor'],[30,'moderate'],[60,'severe']] ascending by
-  // upper bound; severityOf() returns 'critical' for anything at/above the last limit. Build "X-Y cm" rows
-  // directly from that same table so the legend can never drift from the actual thresholds.
   const legendRows = DEFAULT_BANDS_CM.map(([limit, label], i) => {
     const lo = i === 0 ? 0 : DEFAULT_BANDS_CM[i - 1][0]
     return { sev: label, text: `${lo}–${limit} cm` }

@@ -22,7 +22,7 @@ export const TIER_COLOR = {
   SEVERE: '#ff3b3b',
   CRITICAL: '#c81e5c',
   DRAINAGE: '#a78bfa',
-  ROUTE: '#00d4ff',
+  ROUTE: '#c58a3d',
 }
 export const TIER_ICON = {
   WATCH: '⚠',

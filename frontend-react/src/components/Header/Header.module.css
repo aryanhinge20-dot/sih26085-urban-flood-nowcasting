@@ -1,141 +1,180 @@
+/* ── Command centre masthead ─────────────────────────── */
 .header {
   position: absolute;
-  top: 14px;
-  left: 14px;
-  right: 14px;
-  height: 56px;
+  top: 10px;
+  left: 12px;
+  right: 12px;
+  height: 48px;
   z-index: 1000;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 0 18px;
+  justify-content: space-between;
+  padding: 0 14px;
+  gap: 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border: 1px solid var(--border);
+  border-top-color: rgba(255,255,255,0.65);
+  box-shadow: var(--shadow-panel);
 }
 
-/* Brand */
-.brand {
+/* ── Left: Brand ─────────────────────────────────────── */
+.leftCol {
   display: flex;
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
 }
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex: 0 0 auto;
-  transition: box-shadow 0.3s ease;
-}
-.dotSimulating {
-  animation: blink-dot 1.2s ease-in-out infinite;
-}
-.title {
-  font-size: 15px;
-  font-weight: 800;
-  letter-spacing: -0.2px;
-  color: var(--text);
-  line-height: 1.2;
-}
-.tagline {
-  font-size: 10px;
-  color: var(--text-faint);
-  font-weight: 500;
-  letter-spacing: 0.1px;
-  line-height: 1.2;
-}
 
-/* Pilot */
-.pilot {
-  flex: 0 0 auto;
-  padding-left: 16px;
-  border-left: 1px solid var(--border);
-  line-height: 1.3;
-}
-.pilotName {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text);
-}
-.pilotSub {
-  font-size: 10px;
-  color: var(--text-faint);
-}
-
-.spacer { flex: 1; }
-
-/* Composite data-mode — the key semantic fix */
-.dataMode {
+.brandBtn {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  flex: 0 0 auto;
-  max-width: 320px;
-}
-.dataModeInfra {
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.dataModeSep {
-  color: var(--text-faint);
-}
-.dataModeRainfall {
-  font-weight: 700;
-  white-space: nowrap;
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
-}
-.dataModeSynth  { background: rgba(245,166,35,0.12);   color: var(--synthetic);     }
-.dataModeReplay { background: rgba(155,135,212,0.12);  color: var(--demonstration); }
-.dataModeNwp    { background: rgba(155,135,212,0.12);  color: var(--nwp);           }
-.dataModeLive   { background: rgba(34,212,154,0.12);   color: var(--real);          }
-
-/* Forecast clock */
-.clock {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: baseline;
-  gap: 3px;
-  padding-left: 16px;
-  border-left: 1px solid var(--border);
-}
-.clockLabel {
-  font-size: 10px;
-  color: var(--text-faint);
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  font-family: var(--mono);
-}
-.clockValue {
-  font-family: var(--mono);
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text);
+  gap: 9px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
 }
 
-/* Status */
-.statusBlock {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding-left: 16px;
-  border-left: 1px solid var(--border);
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-dim);
-  white-space: nowrap;
-  flex: 0 0 auto;
-}
-.statusDot {
+/* Animated operational status dot */
+.brandDot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--text-faint);
+  background: var(--accent);
   flex: 0 0 auto;
-  transition: background var(--transition-base);
+  box-shadow: 0 0 0 0 rgba(122,34,49,0.5);
 }
-.statusDotOk   { background: var(--real); }
-.statusDotBusy { animation: blink-dot 1s ease-in-out infinite; background: var(--accent); }
-.statusDotBad  { background: var(--sev-severe); }
-.statusText    { color: var(--text-dim); }
+.brandDotPulse {
+  animation: pulse-ring 1.4s ease-in-out infinite;
+}
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0 rgba(122,34,49,0.6); }
+  60%  { box-shadow: 0 0 0 5px rgba(122,34,49,0.0); }
+  100% { box-shadow: 0 0 0 0 rgba(122,34,49,0.0); }
+}
+
+.brandMeta {
+  display: flex;
+  flex-direction: column;
+}
+
+.brandTitle {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.brandSub {
+  font-size: 9px;
+  color: var(--text-faint);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.overviewBtn {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 4px 9px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.overviewBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* ── Centre: Location ─────────────────────────────────── */
+.centerCol {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Right: Status + Data Source ─────────────────────── */
+.rightCol {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+}
+
+.metaBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.metaLabel {
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+
+.metaValue {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+.metaDivider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.statusDotOk    { background: var(--real); box-shadow: 0 0 5px rgba(34,197,94,0.4); }
+.statusDotBusy  { background: var(--accent); animation: pulse-ring 1.2s infinite; }
+.statusDotBad   { background: var(--sev-critical); }
+.statusDotStale { background: var(--amber); }
+
+.timestepAccent {
+  color: var(--accent-bright);
+  font-weight: 700;
+  font-family: var(--mono);
+}
+
+.metaSub {
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+.metaDim {
+  color: var(--text-faint);
+  font-family: var(--mono);
+}

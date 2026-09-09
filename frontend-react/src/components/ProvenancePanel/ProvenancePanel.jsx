@@ -87,8 +87,8 @@ export default function ProvenancePanel() {
           )}
 
           <div className={styles.footer}>
-            Prototype for SIH26085. Simplified 2D storage-cell surface physics and a capacity-limited drainage
-            solver; depths carry terrain and parameter uncertainty. Not an operational flood warning system.
+            <strong>System Advisory — not an official government warning.</strong> Prototype for SIH26085. Simplified 2D storage-cell surface physics and a capacity-limited drainage
+            solver; depths carry terrain and parameter uncertainty.
           </div>
         </div>
       </details>

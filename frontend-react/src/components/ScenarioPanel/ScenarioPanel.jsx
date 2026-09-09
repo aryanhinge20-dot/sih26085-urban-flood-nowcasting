@@ -2,11 +2,15 @@ import { useFloodNet, LIVE_ID, ECMWF_ID } from '../../state/FloodNetContext.jsx'
 import { fmt, shortId } from '../../lib/format.js'
 import styles from './ScenarioPanel.module.css'
 
+// A hypothetical what-if input the operator chooses (never a measured/real-time blockage reading) --
+// labelled "Blockage scenario" in the UI, not "drainage state", so it's never mistaken for model-derived
+// output. Actual model-derived drainage state (surcharging node count, utilization) is reported separately
+// in MetricsPanel/WhyFloodedPanel from the real simulation output.
 const BLOCKAGE_OPTIONS = [
-  { value: 'none',    label: 'None — all drains clear',                spec: { mode: 'none' } },
-  { value: 'half',    label: 'Uniform 50% blockage',                   spec: { mode: 'fraction', fraction: 0.5 } },
-  { value: 'seventy', label: 'Uniform 70% blockage (validated demo)',   spec: { mode: 'fraction', fraction: 0.7 } },
-  { value: 'random',  label: 'Random 30% of drains at 60%',            spec: { mode: 'random', share: 0.3, fraction: 0.6 } },
+  { value: 'none',    label: 'None — all drains clear (0%)',              spec: { mode: 'none' } },
+  { value: 'half',    label: 'Uniform 50% blockage (what-if)',            spec: { mode: 'fraction', fraction: 0.5 } },
+  { value: 'seventy', label: 'Uniform 70% blockage (what-if, validated demo case)', spec: { mode: 'fraction', fraction: 0.7 } },
+  { value: 'random',  label: 'Random 30% of drains at 60% (what-if)',     spec: { mode: 'random', share: 0.3, fraction: 0.6 } },
 ]
 
 /** SOURCE / MODE / STATION / RETRIEVED / RAINFALL / FORECAST EXTENSION — rendered
@@ -136,7 +140,7 @@ export default function ScenarioPanel() {
     scenarios, scenarioId, setScenarioId, currentScenario,
     blockage, setBlockage,
     runSimulation, runCompare, simulating,
-    run, simError, status, liveAttempt, ecmwfAttempt,
+    run, simError, status, liveAttempt, ecmwfAttempt, isStale,
   } = useFloodNet()
 
   const blockageKey    = BLOCKAGE_OPTIONS.find((o) => JSON.stringify(o.spec) === JSON.stringify(blockage))?.value ?? 'none'
@@ -161,7 +165,12 @@ export default function ScenarioPanel() {
 
       <div className={styles.field}>
         <label className="field-label" htmlFor="scenario-select">Scenario</label>
-        <select id="scenario-select" value={scenarioId ?? ''} onChange={(e) => setScenarioId(e.target.value)}>
+        <select
+          id="scenario-select"
+          value={scenarioId ?? ''}
+          onChange={(e) => setScenarioId(e.target.value)}
+          disabled={simulating}
+        >
           {scenarios.map((s) => (
             <option key={s.id} value={s.id}>{s.name} — {fmt(s.total_mm, 0)} mm</option>
           ))}
@@ -214,11 +223,12 @@ export default function ScenarioPanel() {
       )}
 
       <div className={styles.field}>
-        <label className="field-label" htmlFor="blockage-select">Drainage blockage</label>
+        <label className="field-label" htmlFor="blockage-select">Blockage scenario (what-if)</label>
         <select
           id="blockage-select"
           value={blockageKey}
           onChange={(e) => setBlockage(BLOCKAGE_OPTIONS.find((o) => o.value === e.target.value)?.spec)}
+          disabled={simulating}
         >
           {BLOCKAGE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -234,7 +244,7 @@ export default function ScenarioPanel() {
           aria-busy={simulating}
         >
           {simulating ? (
-            <><span className={styles.btnSpinner} aria-hidden="true" />Generating…</>
+            <><span className={styles.btnSpinner} aria-hidden="true" />Generating forecast…</>
           ) : 'Run forecast'}
         </button>
         <button
@@ -248,21 +258,21 @@ export default function ScenarioPanel() {
 
       {simError && <div className={styles.errBox}>{simError}</div>}
 
-      {/* Post-run provenance blocks — shown only when run genuinely used that source */}
-      {runIsLive  && <LiveProvenanceBlock  rainfallSource={run.provenance.rainfall_source} />}
-      {runIsEcmwf && <EcmwfProvenanceBlock rainfallSource={run.provenance.rainfall_source} />}
+      {/* Post-run provenance blocks — shown only when run genuinely used that source and is not stale */}
+      {run && !isStale && runIsLive  && <LiveProvenanceBlock  rainfallSource={run.provenance.rainfall_source} />}
+      {run && !isStale && runIsEcmwf && <EcmwfProvenanceBlock rainfallSource={run.provenance.rainfall_source} />}
 
-      {/* Run summary grid — replaces prose block; run ID stays in technical provenance */}
-      {run && summary && (
+      {/* Run summary grid — shown only when current active run matches selected inputs */}
+      {run && !isStale && summary && (
         <div className={styles.runSummary}>
           {run.__isCompareBlocked && (
             <div className={styles.compareNote}>
-              Viewing <strong>BLOCKED</strong> run — normal (cyan) vs blocked (red) on timeline
+              Viewing <strong>BLOCKED</strong> run — normal (brass) vs blocked (terracotta) on timeline
             </div>
           )}
           <div className={styles.summaryGrid}>
             <div className={styles.summaryCell}>
-              <span className={styles.summaryCellLabel}>Peak depth</span>
+              <span className={styles.summaryCellLabel}>Forecast peak depth</span>
               <span className={styles.summaryCellValue}>{fmt(summary.max_depth_cm, 0)} cm</span>
             </div>
             <div className={styles.summaryCell}>

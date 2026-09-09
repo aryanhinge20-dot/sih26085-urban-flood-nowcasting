@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { FloodNetProvider } from './state/FloodNetContext.jsx'
+import LandingPage from './components/LandingPage/LandingPage.jsx'
 import Header from './components/Header/Header.jsx'
 import MapView from './components/MapView/MapView.jsx'
 import ScenarioPanel from './components/ScenarioPanel/ScenarioPanel.jsx'
@@ -15,15 +16,32 @@ import LoadingOverlay from './components/LoadingOverlay/LoadingOverlay.jsx'
 import NoticeBanner from './components/NoticeBanner/NoticeBanner.jsx'
 import styles from './App.module.css'
 
-// Right-rail tabs.  Overview and Alerts are always shown; the rest are
-// secondary and collapse into the tab strip.  Tab keys are stable strings used
-// as aria-controls / data attributes — do not change them.
+// ─── Navigation ──────────────────────────────────────────────────────────────
+//
+// Architecture: Two views — landing (/) and dashboard (/dashboard).
+// We use pushState/popstate so:
+//   • scroll anchors on the landing page do NOT create history entries
+//   • Back from dashboard → landing (one step, not through every anchor scroll)
+//   • Refresh on dashboard → dashboard
+//   • Refresh on landing → landing
+//
+// Detection: we look at window.location.pathname ending in /dashboard.
+// When running under Vite's /static/ base path this still works because
+// we always pushState to the same origin.
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, '') // e.g. "/static"
+
+function isDashboardPath() {
+  return window.location.pathname.startsWith(BASE + '/dashboard')
+}
+
+// ─── Right rail tabs ──────────────────────────────────────────────────────────
 const RIGHT_TABS = [
-  { key: 'overview',   label: 'Overview' },
-  { key: 'alerts',     label: 'Alerts'   },
-  { key: 'why',        label: 'Why'      },
-  { key: 'routing',    label: 'Route'    },
-  { key: 'provenance', label: 'Sources'  },
+  { key: 'overview',   label: 'Overview'    },
+  { key: 'alerts',     label: 'Alerts'      },
+  { key: 'why',        label: 'Why flooded' },
+  { key: 'routing',    label: 'Route'       },
+  { key: 'provenance', label: 'Sources'     },
 ]
 
 function RightPanel() {
@@ -31,7 +49,6 @@ function RightPanel() {
 
   return (
     <aside className={`${styles.rightPanel} glass-panel`}>
-      {/* Tab strip */}
       <div className={styles.tabStrip} role="tablist" aria-label="Right panel sections">
         {RIGHT_TABS.map((t) => (
           <button
@@ -48,7 +65,6 @@ function RightPanel() {
         ))}
       </div>
 
-      {/* Tab panels — rendered in DOM to preserve state; hidden when not active */}
       <div
         id="rtab-overview"
         role="tabpanel"
@@ -56,7 +72,6 @@ function RightPanel() {
         className={`${styles.tabPanel} scroll-y ${activeTab === 'overview' ? styles.tabPanelActive : ''}`}
       >
         <MetricsPanel />
-        <AlertsPanel />
         <FloodedStreets />
       </div>
 
@@ -67,7 +82,6 @@ function RightPanel() {
         className={`${styles.tabPanel} scroll-y ${activeTab === 'alerts' ? styles.tabPanelActive : ''}`}
       >
         <AlertsPanel />
-        <MetricsPanel />
       </div>
 
       <div
@@ -76,7 +90,6 @@ function RightPanel() {
         aria-labelledby="rtab-btn-why"
         className={`${styles.tabPanel} scroll-y ${activeTab === 'why' ? styles.tabPanelActive : ''}`}
       >
-        <FloodedStreets />
         <WhyFloodedPanel />
       </div>
 
@@ -101,25 +114,63 @@ function RightPanel() {
   )
 }
 
-function Dashboard() {
+function MainApp() {
+  const [view, setView] = useState(() =>
+    isDashboardPath() ? 'dashboard' : 'landing'
+  )
+  const [isTransitioning, setIsTransitioning] = useState(false)
+
+  // Listen for popstate (Browser Back / Forward)
+  useEffect(() => {
+    const handlePop = () => {
+      setView(isDashboardPath() ? 'dashboard' : 'landing')
+    }
+    window.addEventListener('popstate', handlePop)
+    return () => window.removeEventListener('popstate', handlePop)
+  }, [])
+
+  const navigateToDashboard = useCallback(() => {
+    setIsTransitioning(true)
+    setTimeout(() => {
+      if (!isDashboardPath()) {
+        window.history.pushState({ view: 'dashboard' }, '', BASE + '/dashboard')
+      }
+      setView('dashboard')
+      setIsTransitioning(false)
+    }, 360)
+  }, [])
+
+  const navigateToLanding = useCallback(() => {
+    if (isDashboardPath()) {
+      window.history.pushState({ view: 'landing' }, '', BASE + '/')
+    }
+    setView('landing')
+  }, [])
+
   return (
-    <div className={styles.root}>
-      <div className={styles.mapLayer}>
-        <MapView />
-      </div>
+    <div className={view === 'landing' ? styles.landingContainer : styles.dashboardContainer}>
+      {view === 'landing' ? (
+        <LandingPage onEnter={navigateToDashboard} isTransitioning={isTransitioning} />
+      ) : (
+        <div className={styles.root}>
+          <div className={styles.mapLayer}>
+            <MapView />
+          </div>
 
-      <Header />
+          <Header onToggleHome={navigateToLanding} isHomeActive={false} />
 
-      <aside className={`${styles.leftPanel} glass-panel scroll-y`}>
-        <ScenarioPanel />
-        <LayerControl />
-      </aside>
+          <aside className={`${styles.leftPanel} glass-panel scroll-y`}>
+            <ScenarioPanel />
+            <LayerControl />
+          </aside>
 
-      <RightPanel />
+          <RightPanel />
 
-      <ForecastTimeline />
-      <NoticeBanner />
-      <LoadingOverlay />
+          <ForecastTimeline />
+          <NoticeBanner />
+          <LoadingOverlay />
+        </div>
+      )}
     </div>
   )
 }
@@ -127,7 +178,7 @@ function Dashboard() {
 export default function App() {
   return (
     <FloodNetProvider>
-      <Dashboard />
+      <MainApp />
     </FloodNetProvider>
   )
 }
