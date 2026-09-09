@@ -10,13 +10,15 @@ Pilot: **Hindmata / Dadar–Parel–Matunga**, ~4.7 km², 10 m grid. See `docs/D
 
 - **Backend** (`backend/floodnet/`, FastAPI + numpy): terrain/drainage/simulation physics, the
   `RainfallProvider` abstraction (`ScenarioProvider` / `HistoricalReplayProvider` / `IMDObservationProvider` /
-  inert `ExternalNowcastProvider`), REST API, provenance. See `docs/ARCHITECTURE.md`.
+  `ECMWFForecastProvider` / inert `ExternalNowcastProvider`), REST API, provenance. See `docs/ARCHITECTURE.md`.
 - **Frontend** (`frontend-react/`, React + Vite): map, timeline, scenario/route/provenance panels, and a
   FloodNet Forecast Alert layer (`src/lib/alerts.js` + `AlertsPanel`) — all derived client-side from the
   existing simulation API responses, no separate alert backend/database.
-- **Data modes** shown everywhere in the UI: `SYNTHETIC SCENARIO`, `HISTORICAL REPLAY` (26 July 2005), and
+- **Data modes** shown everywhere in the UI: `SYNTHETIC SCENARIO`, `HISTORICAL REPLAY` (26 July 2005),
   `LIVE OBSERVATION` (real IMD data when `IMD_API_KEY` is configured — see below; shows `LIVE UNAVAILABLE`
-  otherwise, never a silent fallback). Full audit: `docs/LIVE_RAINFALL_AUDIT.md`.
+  otherwise, never a silent fallback; full audit: `docs/LIVE_RAINFALL_AUDIT.md`), and `ECMWF NWP FORECAST`
+  (real ECMWF precipitation forecast via Open-Meteo, no key needed — a temporary stand-in while IMD access is
+  pending; never called a nowcast or IMD product. Full audit: `docs/ECMWF_OPENMETEO_AUDIT.md`).
 - **Scientific limitations**: `docs/VALIDATION.md`, `docs/STATUS.md`.
 
 ## Quick start (Windows, PowerShell)

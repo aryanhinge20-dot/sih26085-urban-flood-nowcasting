@@ -47,7 +47,7 @@ def test_status():
     assert len(providers) >= 1
     for entry in providers:
         assert {"id", "source_type", "data_mode"} <= set(entry)
-        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation")  # never "external_nowcast" (inert)
+        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation", "ecmwf_forecast")  # never "external_nowcast" (inert)
 
 
 def test_provenance():
@@ -331,4 +331,86 @@ def test_status_reports_live_provider_configured_state(monkeypatch):
     assert "live" in providers
     assert providers["live"]["available"] is False
     assert "IMD_API_KEY" in providers["live"].get("reason", "")
+    assert "external_nowcast" not in providers
+
+
+# ----------------------------------------------------------------------------- scenario_id='ecmwf' (Open-Meteo NWP)
+def test_simulate_ecmwf_with_mocked_provider_runs_the_real_engine(monkeypatch):
+    """Mirrors test_simulate_live_with_mocked_provider_runs_the_real_engine exactly, for the ECMWF path --
+    proves the normalized ECMWF forecast reaches the SAME unmodified physics engine as every other source."""
+    if not REAL_PILOT_BUILT:
+        pytest.skip("real pilot data not built")
+    import numpy as np
+    from floodnet.config import HORIZON_S, RAIN_DT_S
+    from floodnet.contracts import RainfallScenario
+    from floodnet.provenance import Provenance, Tag
+    from floodnet.rainfall.provider import ECMWFForecastProvider, RainfallSourceMeta
+
+    t_s = np.arange(0, HORIZON_S + 1, RAIN_DT_S, dtype=float)
+    fake_scen = RainfallScenario(id="ecmwf", name="ECMWF NWP forecast (Open-Meteo), TEST", t_s=t_s,
+                                 intensity_mm_h=np.full_like(t_s, 5.0),
+                                 provenance=Provenance(Tag.NWP, "test", "mocked ECMWF forecast, 5 mm/h for 3h"))
+    fake_detail = {"source": "Open-Meteo", "model": "ECMWF", "data_type": "Numerical Weather Prediction",
+                   "classification": "FORECAST", "retrieved_at": "2026-09-09T00:00:00+00:00",
+                   "forecast_timestamps": ["2026-09-09T01:00", "2026-09-09T02:00", "2026-09-09T03:00"],
+                   "precipitation_mm": [5.0, 5.0, 5.0], "location_lonlat": [72.845, 19.02],
+                   "location_source": "Hindmata/Dadar pilot bbox centroid (config.PILOT_BBOX_LONLAT)",
+                   "endpoint": "https://api.open-meteo.com/v1/ecmwf"}
+    fake_meta = RainfallSourceMeta(source_type="ecmwf_forecast", source_name="ECMWF NWP (Open-Meteo)",
+                                   timestamp="2026-09-09T00:00:00+00:00", forecast_horizon_min=HORIZON_S // 60,
+                                   resolution_min=60, data_mode="NWP", provenance=fake_scen.provenance, detail=fake_detail)
+    monkeypatch.setattr(ECMWFForecastProvider, "get", lambda self, scenario_id=None, **kw: (fake_scen, fake_meta))
+
+    r = client.post("/api/simulate", json={"scenario_id": "ecmwf", "blockage": {"mode": "none"}, "horizon_min": 30})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["scenario_id"] == "ecmwf"
+    assert body["provenance"]["rainfall"]["tag"] == "NWP"
+    assert "mocked" in body["provenance"]["rainfall"]["note"] or "forecast" in body["provenance"]["rainfall"]["note"].lower()
+    # a real run happened: frames + a genuinely closing mass balance, not a stub response
+    assert body["n_frames"] >= 2
+    assert abs(body["mass_balance"]["error_pct"]) < 0.1
+
+    rs = body["provenance"]["rainfall_source"]
+    assert rs["source_type"] == "ecmwf_forecast"
+    assert rs["detail"]["source"] == "Open-Meteo"
+    assert rs["detail"]["model"] == "ECMWF"
+    assert rs["detail"]["classification"] == "FORECAST"
+
+    r2 = client.get(f"/api/simulate/{body['run_id']}")
+    assert r2.status_code == 200 and r2.json()["run_id"] == body["run_id"]
+
+
+def test_simulate_ecmwf_unavailable_is_503_not_fake_data(monkeypatch):
+    """A failed ECMWF fetch must never silently fall back to synthetic rainfall while still labelled ecmwf."""
+    from floodnet.rainfall.provider import ECMWFForecastProvider, ProviderUnavailable
+
+    def _boom(self, scenario_id=None, **kw):
+        raise ProviderUnavailable("Open-Meteo ECMWF request failed: ConnectError")
+
+    monkeypatch.setattr(ECMWFForecastProvider, "get", _boom)
+    r = client.post("/api/simulate", json={"scenario_id": "ecmwf", "blockage": {"mode": "none"}, "horizon_min": 30})
+    assert r.status_code == 503
+    assert "Traceback" not in r.text
+    assert "Open-Meteo" in r.json().get("detail", "")
+
+
+def test_simulate_static_and_live_scenarios_unaffected_by_ecmwf_wiring():
+    """Regression: adding scenario_id='ecmwf' support must not change behaviour for the existing modes."""
+    for sid in ("heavy", "july2005"):
+        r = client.post("/api/simulate", json={"scenario_id": sid, "blockage": {"mode": "none"}, "horizon_min": 15})
+        _skip_if_503(r)
+        assert r.status_code == 200, r.text
+        assert r.json()["scenario_id"] == sid
+        assert "rainfall_source" not in r.json()["provenance"]  # only the live/ecmwf paths add this key
+
+
+def test_status_reports_ecmwf_provider_needs_no_credentials(monkeypatch):
+    from floodnet.rainfall.provider import _ecmwf_provider
+    _ecmwf_provider.clear_cache()
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    providers = {p["id"]: p for p in r.json()["rainfall_providers"]}
+    assert "ecmwf" in providers
+    assert providers["ecmwf"]["available"] is True
     assert "external_nowcast" not in providers

@@ -61,6 +61,10 @@ Evidence lives in `research/mumbai/*.md` and `docs/MUMBAI_FEASIBILITY.md`. Where
   3. `NWP` (optional live) — Open-Meteo hourly precipitation for the pilot centroid, labelled "NWP model forecast — not radar nowcast" in the API and UI. This is the fallback the PS criticises; it is shown only as the live-mode driver with that label.
   4. `P2` — IMD Veravali radar GIF (reachable, no auth) + pysteps extrapolation. Only if time remains; legal grey area noted.
 - **Spatial form:** the driver is a time series applied uniformly or with a simple spatial gradient across the 4.7 km² pilot — stated openly (radar-scale spatial structure is not available).
+- **Implementation note (2026-09-09):** driver 3 (Open-Meteo ECMWF NWP) implemented as `ECMWFForecastProvider`
+  (`backend/floodnet/rainfall/provider.py`, `scenario_id="ecmwf"`), selectable independently alongside the
+  synthetic scenarios, the 2005 replay, and the still-pending IMD live-observation path — none of which it
+  replaces or disables. Full source audit: `docs/ECMWF_OPENMETEO_AUDIT.md`.
 
 ### D-06 — Ground truth: Flooding Spots + Chitale 2005
 - **Evidence:** `research/mumbai/FLOOD_GROUND_TRUTH.md`; lead-verified 21 polygons in the pilot bbox. Records suffixed "(Delete)" / "(Tackled)" must be filtered or shown as such; layer vintage ~2017, currency unconfirmed.

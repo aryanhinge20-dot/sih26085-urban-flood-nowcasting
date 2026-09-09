@@ -6,7 +6,7 @@ producing a `RainfallScenario`, plus a `RainfallSourceMeta` describing where tha
 from, so callers (the API layer) can ask "give me rainfall input X" without knowing whether X is a hardcoded
 design storm, a replayed historical event, or (in the future) a live nowcast feed.
 
-Four providers are wired today:
+Five providers are wired today:
   - `ScenarioProvider`          SYNTHETIC design storms: moderate / heavy / cloudburst.
   - `HistoricalReplayProvider`  REAL, transcribed historical event: 26 July 2005 (Chitale Committee report).
   - `IMDObservationProvider`    REAL observed rainfall from the IMD API Management Platform
@@ -14,6 +14,12 @@ Four providers are wired today:
                                  `docs/LIVE_RAINFALL_AUDIT.md` for the full access audit. Raises
                                  `ProviderUnavailable` (not a fabricated value) when no key is configured or
                                  the call fails.
+  - `ECMWFForecastProvider`     NWP forecast (0-3h precipitation) from ECMWF via Open-Meteo
+                                 (api.open-meteo.com/v1/ecmwf), used as a temporary stand-in while official
+                                 IMD API access is pending -- see `docs/ECMWF_OPENMETEO_AUDIT.md`. This is a
+                                 numerical-weather-prediction FORECAST, not a radar nowcast and not an IMD
+                                 product; never labelled as either. Raises `ProviderUnavailable` (not a
+                                 fabricated value) if the call fails or returns insufficient data.
   - `ExternalNowcastProvider`   inert interface stub for a future IMD/radar/pysteps adapter. Calling `.get()`
                                  raises `NotImplementedError` -- no live nowcast source is connected in this
                                  prototype, and this module will never fabricate one.
@@ -36,6 +42,7 @@ from typing import Optional
 
 import numpy as np
 
+from .. import config
 from ..config import HORIZON_S, RAIN_DT_S
 from ..contracts import RainfallScenario
 from ..provenance import Provenance, Tag
@@ -45,6 +52,7 @@ log = logging.getLogger(__name__)
 SCENARIO_IDS: tuple[str, ...] = ("moderate", "heavy", "cloudburst")
 HISTORICAL_REPLAY_ID = "july2005"
 LIVE_ID = "live"
+ECMWF_ID = "ecmwf"
 
 
 @dataclass(frozen=True)
@@ -286,6 +294,164 @@ class IMDObservationProvider(RainfallProvider):
         return scen, meta
 
 
+class ECMWFForecastProvider(RainfallProvider):
+    """Temporary REAL rainfall FORECAST source: ECMWF numerical weather prediction, fetched from Open-Meteo's
+    free ECMWF endpoint (api.open-meteo.com/v1/ecmwf) -- used while official IMD API access (D-05,
+    docs/LIVE_RAINFALL_AUDIT.md) is still pending. See `docs/ECMWF_OPENMETEO_AUDIT.md` for the full source
+    audit this class implements: endpoint, exact fields, temporal resolution, and limitations.
+
+    WHAT THIS IS, AND WHAT IT IS NOT
+    ---------------------------------
+    Open-Meteo's `precipitation` hourly variable is ECMWF IFS model output: "Total precipitation (rain,
+    showers, snow) sum of the preceding hour" (mm) -- an NWP FORECAST, not an observation and not a radar
+    nowcast. It carries no relationship to IMD; it is never labelled IMD, radar, or nowcast anywhere in this
+    codebase. Tagged `Tag.NWP` (see provenance.py), a tag that already existed in this codebase specifically
+    for this purpose (see `ExternalNowcastProvider`'s docstring) and was, until now, unused.
+
+    NORMALISATION (the only transformation applied, and it is a real one, not hidden): the engine needs
+    `intensity_mm_h` at RAIN_DT_S (5-min) resolution; Open-Meteo returns hourly values. Since Open-Meteo's own
+    hourly figure already represents the whole hour ("sum of the preceding hour"), each real hourly value is
+    held CONSTANT across that hour's 5-min steps -- the exact same convention already used by
+    `floodnet.data.scenarios.scenarios()['july2005']` for the (also hourly) Chitale/Santacruz replay ("mm in
+    1 h == mm/h; hourly values held constant across each hour's 5-min steps"). No value is interpolated,
+    invented, or estimated between real hourly points.
+
+    The FloodNet 0-3h engine window needs 3 consecutive future hourly values; if Open-Meteo returns fewer
+    (edge-of-forecast-window, malformed response, a null in the needed hours, etc.) this raises
+    `ProviderUnavailable` rather than zero-filling the missing hour(s) -- an unfilled hour would silently read
+    as "no rain", which is exactly the kind of fabrication this project forbids.
+    """
+
+    BASE_URL = "https://api.open-meteo.com/v1/ecmwf"
+    TIMEOUT_S = 15.0
+    CACHE_TTL_S = 600.0     # 10 min courtesy TTL -- mirrors IMDObservationProvider; Open-Meteo's own model
+                            # update cadence is far coarser than this, so more frequent re-fetching would
+                            # only hammer their (free, no-key) endpoint without adding new information.
+    FORECAST_HOURS = 4      # request one hour of buffer beyond the 3 we need, in case the first returned
+                            # hourly bucket is already the (partially elapsed) current hour.
+    MIN_HOURS_REQUIRED = 3  # FloodNet's engine window is HORIZON_S = 3 h; anything less is reported as
+                            # unavailable, never silently zero-filled.
+
+    def __init__(self, lat: Optional[float] = None, lon: Optional[float] = None):
+        # No coordinates invented: default is the Hindmata/Dadar pilot bbox centroid, read from the single
+        # source of truth for pilot geometry (config.PILOT_BBOX_LONLAT), not a re-typed literal.
+        if lat is None or lon is None:
+            west, south, east, north = config.PILOT_BBOX_LONLAT
+            lon = lon if lon is not None else (west + east) / 2.0
+            lat = lat if lat is not None else (south + north) / 2.0
+        self.lat = lat
+        self.lon = lon
+        self._cache: Optional[tuple[float, RainfallScenario, RainfallSourceMeta]] = None
+
+    def clear_cache(self) -> None:
+        self._cache = None
+
+    def get(self, scenario_id: Optional[str] = None, **kwargs) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        sid = scenario_id or ECMWF_ID
+        if sid != ECMWF_ID:
+            raise KeyError(f"ECMWFForecastProvider only serves {ECMWF_ID!r}, got {sid!r}")
+        import time
+        now = time.monotonic()
+        if self._cache is not None and (now - self._cache[0]) < self.CACHE_TTL_S:
+            return self._cache[1], self._cache[2]
+        payload, retrieved_at = self._fetch()
+        scen, meta = self._normalize(payload, retrieved_at)
+        self._cache = (now, scen, meta)
+        return scen, meta
+
+    def _fetch(self) -> tuple[dict, datetime]:
+        import httpx
+        params = {"latitude": round(self.lat, 5), "longitude": round(self.lon, 5),
+                   "hourly": "precipitation", "forecast_hours": self.FORECAST_HOURS}
+        try:
+            with httpx.Client(timeout=self.TIMEOUT_S) as client:
+                r = client.get(self.BASE_URL, params=params)
+                r.raise_for_status()
+                data = r.json()
+        except Exception as ex:  # noqa: BLE001
+            # No API key is used here (Open-Meteo's ECMWF endpoint is free for non-commercial use), so unlike
+            # IMDObservationProvider there is no secret to leak -- but the message is still sanitised to a
+            # short, generic summary rather than a raw exception string, for the same "never dump internals
+            # to the HTTP client" discipline used everywhere else in this module.
+            log.warning("Open-Meteo ECMWF request failed (lat=%s lon=%s): %s", self.lat, self.lon, ex)
+            raise ProviderUnavailable(f"Open-Meteo ECMWF request failed: {type(ex).__name__}") from None
+        return data, datetime.now(timezone.utc)
+
+    def _normalize(self, payload: dict, retrieved_at: datetime) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        if not isinstance(payload, dict) or "hourly" not in payload:
+            raise ProviderUnavailable("Open-Meteo ECMWF response did not include an 'hourly' block")
+        hourly = payload["hourly"]
+        if not isinstance(hourly, dict):
+            raise ProviderUnavailable(f"Open-Meteo ECMWF 'hourly' block had an unexpected shape: {type(hourly).__name__}")
+        times = hourly.get("time")
+        precip = hourly.get("precipitation")
+        if not times or not precip:
+            raise ProviderUnavailable("Open-Meteo ECMWF response is missing 'time' or 'precipitation' in its hourly block")
+        if len(times) != len(precip):
+            raise ProviderUnavailable(
+                f"Open-Meteo ECMWF 'time' ({len(times)}) and 'precipitation' ({len(precip)}) arrays have mismatched lengths")
+
+        now_naive = retrieved_at.replace(tzinfo=None)
+        parsed: list[tuple[str, datetime, object]] = []
+        for t, v in zip(times, precip):
+            try:
+                dt = datetime.strptime(t, "%Y-%m-%dT%H:%M")
+            except (TypeError, ValueError) as ex:
+                raise ProviderUnavailable(f"Open-Meteo ECMWF returned an unparseable timestamp: {t!r}") from ex
+            parsed.append((t, dt, v))
+
+        future = [row for row in parsed if row[1] > now_naive]
+        if not future:
+            raise ProviderUnavailable("Open-Meteo ECMWF returned no forecast timestamps after the retrieval time")
+        selected = future[: self.MIN_HOURS_REQUIRED]
+        if len(selected) < self.MIN_HOURS_REQUIRED:
+            raise ProviderUnavailable(
+                f"Open-Meteo ECMWF returned only {len(selected)} usable forecast hour(s); "
+                f"FloodNet's 0-3h window needs {self.MIN_HOURS_REQUIRED}")
+        if any(v is None for _, _, v in selected):
+            raise ProviderUnavailable("Open-Meteo ECMWF returned a null precipitation value within the needed 0-3h window")
+        try:
+            hourly_mm = [max(0.0, float(v)) for _, _, v in selected]
+        except (TypeError, ValueError) as ex:
+            raise ProviderUnavailable(f"Open-Meteo ECMWF precipitation value was not numeric: {ex}") from None
+
+        t_s = np.arange(0, HORIZON_S + 1, RAIN_DT_S, dtype=float)
+        tmin = t_s / 60.0
+        intensity_mm_h = np.zeros_like(t_s)
+        for h, mm in enumerate(hourly_mm):
+            # mm accumulated in 1 h == mean mm/h over that hour (Open-Meteo docs: "sum of the preceding
+            # hour"); held constant across the hour's 5-min steps, same convention as the july2005 replay.
+            intensity_mm_h[(tmin >= 60 * h) & (tmin < 60 * (h + 1))] = mm
+
+        timestamps = [t for t, _, _ in selected]
+        hour_lines = "; ".join(f"{t} = {mm:.2f} mm" for t, mm in zip(timestamps, hourly_mm))
+        note = (f"Open-Meteo ECMWF forecast API (api.open-meteo.com/v1/ecmwf), IFS 0.25 deg model, "
+                f"lat={self.lat:.4f} lon={self.lon:.4f} (Hindmata/Dadar pilot bbox centroid). Retrieved "
+                f"{retrieved_at.isoformat()}. Hourly precipitation (mm, sum of the preceding hour = mean "
+                f"mm/h over that hour): {hour_lines}. This is a numerical-weather-prediction FORECAST, not a "
+                f"radar nowcast and not an IMD product -- temporary source while IMD API access is pending, "
+                f"see docs/ECMWF_OPENMETEO_AUDIT.md. Hourly values held constant across each hour's 5-min "
+                f"steps (same convention as the 26 July 2005 historical replay).")
+        prov = Provenance(Tag.NWP, "Open-Meteo (https://open-meteo.com), ECMWF IFS 0.25 deg forecast model", note)
+        scen = RainfallScenario(id=ECMWF_ID, name="ECMWF NWP forecast (Open-Meteo)", t_s=t_s,
+                                 intensity_mm_h=intensity_mm_h, provenance=prov,
+                                 description="Next 3 forecast hours of ECMWF precipitation via Open-Meteo, "
+                                             "hourly values held constant across 5-min steps. NWP FORECAST -- "
+                                             "not a radar nowcast, not an official IMD product.")
+        detail = {
+            "source": "Open-Meteo", "model": "ECMWF", "data_type": "Numerical Weather Prediction",
+            "classification": "FORECAST", "retrieved_at": retrieved_at.isoformat(),
+            "forecast_timestamps": timestamps, "precipitation_mm": [round(mm, 3) for mm in hourly_mm],
+            "location_lonlat": [round(self.lon, 5), round(self.lat, 5)],
+            "location_source": "Hindmata/Dadar pilot bbox centroid (config.PILOT_BBOX_LONLAT)",
+            "endpoint": self.BASE_URL,
+        }
+        meta = RainfallSourceMeta(source_type="ecmwf_forecast", source_name="ECMWF NWP (Open-Meteo)",
+                                   timestamp=retrieved_at.isoformat(), forecast_horizon_min=HORIZON_S // 60,
+                                   resolution_min=60, data_mode=Tag.NWP.value, provenance=prov, detail=detail)
+        return scen, meta
+
+
 class ExternalNowcastProvider(RainfallProvider):
     """Interface stub for a future live rainfall-nowcast source (e.g. IMD radar QPE/QPF, a pysteps
     extrapolation nowcast, or another NWP feed).
@@ -311,11 +477,12 @@ class ExternalNowcastProvider(RainfallProvider):
             "build. Wire a real implementation of RainfallProvider.get() here before use.")
 
 
-# Module-level singleton: IMDObservationProvider caches its last successful fetch internally (see
-# CACHE_TTL_S) so repeated status checks / live-run requests within one process don't re-hit the IMD API
-# needlessly. list_providers() must always return this SAME instance for 'live', not a fresh one, or the
-# cache would never persist across calls.
+# Module-level singletons: both caching providers keep their last successful fetch internally (see
+# CACHE_TTL_S) so repeated status checks / run requests within one process don't re-hit their upstream API
+# needlessly. list_providers() must always return these SAME instances, not fresh ones, or the cache would
+# never persist across calls.
 _imd_live_provider = IMDObservationProvider()
+_ecmwf_provider = ECMWFForecastProvider()
 
 
 def list_providers() -> dict[str, RainfallProvider]:
@@ -324,6 +491,8 @@ def list_providers() -> dict[str, RainfallProvider]:
     Keyed by scenario/source id: 'moderate', 'heavy', 'cloudburst' -> the shared `ScenarioProvider`;
     'july2005' -> `HistoricalReplayProvider`; 'live' -> the shared `IMDObservationProvider` (may raise
     `ProviderUnavailable` if `IMD_API_KEY` isn't configured -- that is expected, not an error to hide);
+    'ecmwf' -> the shared `ECMWFForecastProvider` (temporary NWP forecast source, may raise
+    `ProviderUnavailable` if Open-Meteo is unreachable or returns insufficient data);
     'external_nowcast' -> the inert `ExternalNowcastProvider`.
     """
     out: dict[str, RainfallProvider] = {}
@@ -332,6 +501,7 @@ def list_providers() -> dict[str, RainfallProvider]:
         out[sid] = scen_provider
     out[HistoricalReplayProvider.SCENARIO_ID] = HistoricalReplayProvider()
     out[LIVE_ID] = _imd_live_provider
+    out[ECMWF_ID] = _ecmwf_provider
     out["external_nowcast"] = ExternalNowcastProvider()
     return out
 
@@ -382,4 +552,16 @@ def provider_status() -> list[dict]:
     else:
         live_row.update(available=True, reason="configured, not yet fetched this process")
     out.append(live_row)
+
+    ecmwf_row: dict = {"id": ECMWF_ID, "source_type": "ecmwf_forecast", "source_name": "ECMWF NWP (Open-Meteo)",
+                        "data_mode": None, "timestamp": None, "resolution_min": None}
+    if _ecmwf_provider._cache is not None:  # a cached successful fetch exists -- report it, no new call
+        _, _, meta = _ecmwf_provider._cache
+        ecmwf_row.update(available=True, source_name=meta.source_name, data_mode=meta.data_mode,
+                          timestamp=meta.timestamp, resolution_min=meta.resolution_min)
+    else:
+        # Unlike IMD, ECMWF via Open-Meteo needs no credentials -- "available" reflects that a fetch is
+        # possible on demand, not that one has already succeeded this process.
+        ecmwf_row.update(available=True, reason="no credentials required; fetched on demand")
+    out.append(ecmwf_row)
     return out

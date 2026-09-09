@@ -9,7 +9,11 @@ export default function Header() {
   const sourceType = currentScenario?.source?.source_type // 'scenario' | 'historical_replay'
   // Based on the RUN that actually executed, not just the dropdown selection -- a forecast is only
   // "live-driven" once IMD data was genuinely fetched and used, never merely because "Live" is selected.
-  const runIsLive = Boolean(run?.provenance?.rainfall_source)
+  // Checked by source_type specifically (not just "some rainfall_source is present") so an ECMWF-driven run
+  // is never mislabelled as a live IMD observation, or vice versa.
+  const runSourceType = run?.provenance?.rainfall_source?.source_type
+  const runIsLive = runSourceType === 'live_observation'
+  const runIsEcmwf = runSourceType === 'ecmwf_forecast'
 
   let statusLabel = 'Idle — select a scenario and run a forecast'
   let statusDot = ''
@@ -41,7 +45,9 @@ export default function Header() {
         <div className={styles.pilotSub}>
           {runIsLive
             ? 'Flood forecast driven by live IMD observation + persistence estimate'
-            : '0–3 h street-level flood forecast'}
+            : runIsEcmwf
+              ? 'Flood forecast driven by ECMWF NWP forecast (Open-Meteo, temporary source)'
+              : '0–3 h street-level flood forecast'}
         </div>
       </div>
 
@@ -53,6 +59,8 @@ export default function Header() {
         </span>
         {runIsLive ? (
           <span className={`${styles.pill} ${styles.pillReal}`}>LIVE OBSERVATION</span>
+        ) : runIsEcmwf ? (
+          <span className={`${styles.pill} ${styles.pillReal}`}>ECMWF NWP FORECAST</span>
         ) : sourceType === 'historical_replay' ? (
           <span className={`${styles.pill} ${styles.pillReplay}`}>HISTORICAL REPLAY</span>
         ) : sourceType === 'scenario' ? (

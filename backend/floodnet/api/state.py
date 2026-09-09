@@ -332,11 +332,28 @@ def _run_live_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
     return res
 
 
+def _run_ecmwf_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
+    """scenario_id='ecmwf': fetch the current ECMWF NWP precipitation forecast (via Open-Meteo, module-level
+    TTL-cached ECMWFForecastProvider) and run the same physics engine on it. Raises ProviderUnavailable
+    (propagated to the caller as HTTP 503, see api/main.py) rather than silently substituting synthetic
+    rainfall while still labelled ECMWF -- see docs/ECMWF_OPENMETEO_AUDIT.md. Mirrors _run_live_scenario
+    exactly; kept as a separate function (not merged with it) because the two rainfall sources must never be
+    conflated -- an ECMWF run must never be reported or displayed as an IMD live observation."""
+    from ..rainfall.provider import list_providers, ECMWF_ID
+    scen, meta = list_providers()[ECMWF_ID].get(ECMWF_ID)
+    res = _run_physics(scen, blockage, horizon_min, get_pilot())
+    res.provenance = dict(res.provenance)
+    res.provenance["rainfall_source"] = meta.to_dict()
+    return res
+
+
 def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
     """Blocking; call via run_in_threadpool."""
-    from ..rainfall.provider import LIVE_ID
+    from ..rainfall.provider import LIVE_ID, ECMWF_ID
     if scenario_id == LIVE_ID:
         res = _run_live_scenario(blockage or {"mode": "none"}, int(horizon_min))
+    elif scenario_id == ECMWF_ID:
+        res = _run_ecmwf_scenario(blockage or {"mode": "none"}, int(horizon_min))
     else:
         cached = _run_scenario_cached(scenario_id, _canon_blockage(blockage), int(horizon_min))
         res = copy.copy(cached)  # fresh run_id/cache-slot per call; frames/mass_balance/provenance shared read-only

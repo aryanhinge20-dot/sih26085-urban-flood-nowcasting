@@ -1,4 +1,4 @@
-import { useFloodNet, LIVE_ID } from '../../state/FloodNetContext.jsx'
+import { useFloodNet, LIVE_ID, ECMWF_ID } from '../../state/FloodNetContext.jsx'
 import { fmt, shortId } from '../../lib/format.js'
 import styles from './ScenarioPanel.module.css'
 
@@ -60,25 +60,84 @@ function LiveStatusIndicator({ providerEntry, liveAttempt }) {
   )
 }
 
+/** SOURCE/MODEL/RETRIEVED/CLASSIFICATION/TIMESTAMPS/RAINFALL block for an ECMWF NWP run -- rendered from the
+ * structured `detail` fields ECMWFForecastProvider attaches to the run's provenance (never parsed out of
+ * prose, mirroring LiveProvenanceBlock). Deliberately labelled "ECMWF NWP" / "Numerical Weather Prediction"
+ * throughout -- never IMD, LIVE, radar, or nowcast. */
+function EcmwfProvenanceBlock({ rainfallSource }) {
+  const d = rainfallSource?.detail || {}
+  const row = (label, value) => (
+    <div className={styles.liveRow}>
+      <span className={styles.liveLabel}>{label}</span>
+      <span className={styles.liveValue}>{value ?? '—'}</span>
+    </div>
+  )
+  return (
+    <div className={styles.liveProv}>
+      <div className={styles.liveHeadline}>Flood forecast driven by ECMWF NWP forecast (temporary source, Open-Meteo)</div>
+      {row('Source', d.source || 'Open-Meteo')}
+      {row('Model', d.model || 'ECMWF')}
+      {row('Classification', d.classification || 'FORECAST')}
+      {row('Retrieved', d.retrieved_at)}
+      {row('Location', d.location_lonlat ? `${d.location_lonlat[1]}, ${d.location_lonlat[0]}` : null)}
+      {row('Forecast hours', d.forecast_timestamps?.join(', '))}
+      {row('Precipitation (mm/h)', d.precipitation_mm?.map((v) => fmt(v, 1)).join(', '))}
+      <div className={styles.liveNote}>
+        Numerical weather prediction forecast — not a radar nowcast, not an IMD product. Temporary source
+        while official IMD API access is pending.
+      </div>
+    </div>
+  )
+}
+
+/** Always-visible readiness indicator for ECMWF, mirroring LiveStatusIndicator -- but ECMWF needs no
+ * credentials, so it is never "unavailable" for a configuration reason, only "idle" or "error" (the request
+ * itself failed) or "ok" (a run genuinely returned a forecast). */
+function EcmwfStatusIndicator({ ecmwfAttempt }) {
+  let state, title, sub
+  if (ecmwfAttempt.status === 'success') {
+    state = 'ok'; title = 'ECMWF NWP'; sub = `Forecast received${ecmwfAttempt.timestamp ? ` — ${ecmwfAttempt.timestamp}` : ''}`
+  } else if (ecmwfAttempt.status === 'error') {
+    state = 'bad'; title = 'ECMWF UNAVAILABLE'; sub = ecmwfAttempt.message || 'Open-Meteo request failed.'
+  } else {
+    state = 'idle'; title = 'ECMWF NWP'; sub = 'Run a forecast to fetch the current ECMWF precipitation forecast'
+  }
+  return (
+    <div className={`${styles.liveStatus} ${styles['liveStatus_' + state]}`}>
+      <span className={styles.liveStatusDot} />
+      <div>
+        <div className={styles.liveStatusTitle}>{title}</div>
+        <div className={styles.liveStatusSub}>{sub}</div>
+      </div>
+    </div>
+  )
+}
+
 export default function ScenarioPanel() {
   const {
     scenarios, scenarioId, setScenarioId, currentScenario,
     blockage, setBlockage,
     runSimulation, runCompare, simulating,
-    run, simError, status, liveAttempt,
+    run, simError, status, liveAttempt, ecmwfAttempt,
   } = useFloodNet()
 
   const blockageKey = BLOCKAGE_OPTIONS.find((o) => JSON.stringify(o.spec) === JSON.stringify(blockage))?.value ?? 'none'
   const sourceType = currentScenario?.source?.source_type
   const isLiveSelected = scenarioId === LIVE_ID
+  const isEcmwfSelected = scenarioId === ECMWF_ID
   const liveProviderEntry = status?.rainfall_providers?.find((p) => p.id === LIVE_ID) || null
   const liveOptionLabel = liveProviderEntry?.available
     ? `Live Observation — ${liveProviderEntry.source_name || 'IMD'}`
     : 'Live Observation (IMD — credentials required)'
+  const ecmwfOptionLabel = 'ECMWF NWP Forecast (Open-Meteo — temporary, while IMD access is pending)'
 
   const summary = run?.summary
   const mb = run?.mass_balance
-  const runIsLive = Boolean(run?.provenance?.rainfall_source)
+  // Based on the RUN that actually executed, not just the dropdown selection -- and specific to each
+  // source_type so an ECMWF run is never shown/labelled as a live IMD observation, or vice versa.
+  const runSourceType = run?.provenance?.rainfall_source?.source_type
+  const runIsLive = runSourceType === 'live_observation'
+  const runIsEcmwf = runSourceType === 'ecmwf_forecast'
 
   return (
     <section className={styles.section}>
@@ -95,6 +154,7 @@ export default function ScenarioPanel() {
             </option>
           ))}
           <option value={LIVE_ID}>{liveOptionLabel}</option>
+          <option value={ECMWF_ID}>{ecmwfOptionLabel}</option>
         </select>
       </div>
 
@@ -109,6 +169,19 @@ export default function ScenarioPanel() {
             <span className="tag-badge tag-UNKNOWN">3-HOUR PERSISTENCE ESTIMATE</span>
           </div>
           <LiveStatusIndicator providerEntry={liveProviderEntry} liveAttempt={liveAttempt} />
+        </>
+      ) : isEcmwfSelected ? (
+        <>
+          <div className={styles.desc}>
+            Runs FloodNet on the current ECMWF (IFS 0.25°) precipitation forecast for the pilot area, fetched
+            from Open-Meteo — a numerical-weather-prediction <b>FORECAST</b>, not a radar nowcast, and not an
+            IMD product. Temporary source while official IMD API access is pending.
+          </div>
+          <div className={styles.sourceRow}>
+            <span className="tag-badge tag-NWP">ECMWF NWP</span>
+            <span className="tag-badge tag-UNKNOWN">FORECAST</span>
+          </div>
+          <EcmwfStatusIndicator ecmwfAttempt={ecmwfAttempt} />
         </>
       ) : (
         currentScenario && (
@@ -155,6 +228,7 @@ export default function ScenarioPanel() {
       {simError && <div className={styles.errBox}>{simError}</div>}
 
       {runIsLive && <LiveProvenanceBlock rainfallSource={run.provenance.rainfall_source} />}
+      {runIsEcmwf && <EcmwfProvenanceBlock rainfallSource={run.provenance.rainfall_source} />}
 
       {run && summary && (
         <div className={styles.runInfo}>

@@ -292,18 +292,19 @@ def _get_run_or_404(run_id: str) -> SimulationResult:
 
 
 async def _simulate(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
-    from ..rainfall.provider import LIVE_ID, ProviderUnavailable
+    from ..rainfall.provider import LIVE_ID, ECMWF_ID, ProviderUnavailable
     p = _pilot()
-    if scenario_id != LIVE_ID and scenario_id not in p["scenarios"]:
-        raise HTTPException(404, f"unknown scenario_id {scenario_id!r}; available: {list(p['scenarios']) + [LIVE_ID]}")
+    if scenario_id not in (LIVE_ID, ECMWF_ID) and scenario_id not in p["scenarios"]:
+        raise HTTPException(404, f"unknown scenario_id {scenario_id!r}; available: {list(p['scenarios']) + [LIVE_ID, ECMWF_ID]}")
     try:
         return await run_in_threadpool(state.run_scenario, scenario_id, blockage, horizon_min)
     except state.ModuleMissing:
         raise
     except ProviderUnavailable as e:
-        # LIVE requested but not usable right now (no IMD_API_KEY, or the upstream call failed) -- 503, not
-        # a silent fallback to synthetic data still labelled live. See docs/LIVE_RAINFALL_AUDIT.md.
-        raise HTTPException(503, f"live rainfall unavailable: {e}")
+        # LIVE/ECMWF requested but not usable right now (no IMD_API_KEY, the upstream call failed, or an
+        # insufficient/malformed response) -- 503, not a silent fallback to synthetic data still labelled as
+        # the requested live/forecast source. See docs/LIVE_RAINFALL_AUDIT.md and docs/ECMWF_OPENMETEO_AUDIT.md.
+        raise HTTPException(503, f"rainfall provider unavailable: {e}")
     except ValueError as e:
         raise HTTPException(422, str(e))
 

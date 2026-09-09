@@ -1,12 +1,16 @@
 """Tests for floodnet.rainfall: the rainfall-source abstraction (separate from the simulation engine)."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from floodnet.contracts import RainfallScenario
 from floodnet.provenance import Tag
 from floodnet.rainfall.provider import (
+    ECMWF_ID,
     LIVE_ID,
+    ECMWFForecastProvider,
     ExternalNowcastProvider,
     HistoricalReplayProvider,
     IMDObservationProvider,
@@ -91,11 +95,13 @@ def test_external_nowcast_provider_raises_not_implemented_and_fabricates_nothing
 
 def test_list_providers_covers_all_wired_sources():
     providers = list_providers()
-    for sid in ("moderate", "heavy", "cloudburst", "july2005", "external_nowcast"):
+    for sid in ("moderate", "heavy", "cloudburst", "july2005", LIVE_ID, ECMWF_ID, "external_nowcast"):
         assert sid in providers
     assert isinstance(providers["external_nowcast"], ExternalNowcastProvider)
     assert isinstance(providers["july2005"], HistoricalReplayProvider)
     assert isinstance(providers["heavy"], ScenarioProvider)
+    assert isinstance(providers[LIVE_ID], IMDObservationProvider)
+    assert isinstance(providers[ECMWF_ID], ECMWFForecastProvider)
 
 
 def test_get_source_meta():
@@ -110,12 +116,22 @@ def test_get_source_meta():
 def test_provider_status_never_reports_external_nowcast_active():
     """No live nowcast source is connected in this prototype -- /api/status must never claim otherwise."""
     status = provider_status()
-    assert len(status) >= 5   # moderate, heavy, cloudburst, july2005, live
+    assert len(status) >= 6   # moderate, heavy, cloudburst, july2005, live, ecmwf
     for entry in status:
-        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation")
+        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation", "ecmwf_forecast")
         assert entry["source_type"] != "external_nowcast"
     ids = {e["id"] for e in status}
-    assert {"moderate", "heavy", "cloudburst", "july2005", "live"} <= ids
+    assert {"moderate", "heavy", "cloudburst", "july2005", "live", "ecmwf"} <= ids
+
+
+def test_provider_status_ecmwf_needs_no_credentials():
+    """Unlike 'live' (gated on IMD_API_KEY), 'ecmwf' must always report available=True -- Open-Meteo's ECMWF
+    endpoint needs no key. provider_status() must not perform a real network call to determine this."""
+    from floodnet.rainfall.provider import _ecmwf_provider
+    _ecmwf_provider.clear_cache()
+    status = {e["id"]: e for e in provider_status()}
+    assert status[ECMWF_ID]["available"] is True
+    assert "credentials" in status[ECMWF_ID].get("reason", "").lower()
 
 
 # ---------------------------------------------------------------------- IMDObservationProvider (live)
@@ -281,3 +297,179 @@ def test_imd_provider_never_used_for_external_nowcast_id():
     assert providers[LIVE_ID] is not providers["external_nowcast"]
     assert isinstance(providers["external_nowcast"], ExternalNowcastProvider)
     assert isinstance(providers[LIVE_ID], IMDObservationProvider)
+
+
+# ---------------------------------------------------------------------- ECMWFForecastProvider (via Open-Meteo)
+# Documented endpoint/fields verified against https://open-meteo.com/en/docs/ecmwf-api (see
+# docs/ECMWF_OPENMETEO_AUDIT.md for the full audit). These tests never make a real network call -- httpx.Client
+# is monkeypatched with a fake response shaped exactly like Open-Meteo's own documented example, so they are
+# fully deterministic and safe to run in normal CI with no credentials and no network access. No API key is
+# needed for this provider (Open-Meteo's ECMWF endpoint is free for non-commercial use).
+
+def _future_hourly(n: int, mm=(4.0, 6.0, 2.0), start_offset_min: int = 40):
+    """n (time, mm) pairs at real, whole-hour-aligned UTC timestamps starting just under an hour from now --
+    mirrors Open-Meteo's own hourly-aligned response shape without needing to monkeypatch datetime.now()."""
+    base = datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=start_offset_min)
+    base = base.replace(minute=0) + timedelta(hours=1)  # round up to the next clean hour boundary
+    times = [(base + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in range(n)]
+    return times, list(mm[:n])
+
+
+def test_ecmwf_provider_successful_response_and_extraction(monkeypatch):
+    times, mm = _future_hourly(3)
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm}}))
+    scen, meta = ECMWFForecastProvider(lat=19.02, lon=72.845).get()
+    assert isinstance(scen, RainfallScenario) and scen.id == ECMWF_ID
+    assert meta.source_type == "ecmwf_forecast"
+    assert meta.data_mode == "NWP"
+    assert scen.provenance.tag == Tag.NWP
+    # correct precipitation extraction: each hour's mm held constant across that hour's 5-min steps
+    assert scen.intensity_mm_h[0] == pytest.approx(mm[0])
+    assert scen.intensity_mm_h[11] == pytest.approx(mm[0])   # last 5-min step still inside hour 0 (55 min)
+    assert scen.intensity_mm_h[12] == pytest.approx(mm[1])   # first step of hour 1 (60 min)
+    assert scen.intensity_mm_h[24] == pytest.approx(mm[2])   # first step of hour 2 (120 min)
+    # correct timestamp handling: exactly the 3 real timestamps Open-Meteo returned, in order
+    assert meta.detail["forecast_timestamps"] == times
+    assert meta.detail["precipitation_mm"] == pytest.approx(mm)
+
+
+def test_ecmwf_provider_provenance_and_detail_fields(monkeypatch):
+    times, mm = _future_hourly(3)
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm}}))
+    scen, meta = ECMWFForecastProvider(lat=19.02, lon=72.845).get()
+    d = meta.detail
+    assert d["source"] == "Open-Meteo"
+    assert d["model"] == "ECMWF"
+    assert d["data_type"] == "Numerical Weather Prediction"
+    assert d["classification"] == "FORECAST"
+    assert d["retrieved_at"]  # non-empty ISO8601 timestamp
+    assert d["location_lonlat"] == [72.845, 19.02]
+    note_lc = scen.provenance.note.lower()
+    assert "forecast" in note_lc
+    # The note must explicitly DISCLAIM being a nowcast/IMD product (the honesty distinction instruction 5/14
+    # requires), never AFFIRM one -- so these phrases must appear only inside a "not a ..." negation.
+    assert "not a radar nowcast" in note_lc
+    assert "not an imd product" in note_lc
+    assert "live observation" not in note_lc  # never claims to be the IMD live-observation path
+    assert scen.provenance.to_dict() == meta.provenance.to_dict()  # same object both places, not re-declared
+
+
+def test_ecmwf_provider_uses_pilot_bbox_centroid_by_default():
+    from floodnet import config
+    west, south, east, north = config.PILOT_BBOX_LONLAT
+    prov = ECMWFForecastProvider()
+    assert prov.lon == pytest.approx((west + east) / 2.0)
+    assert prov.lat == pytest.approx((south + north) / 2.0)
+
+
+def test_ecmwf_provider_sends_hourly_precipitation_request(monkeypatch):
+    times, mm = _future_hourly(3)
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm}}))
+    ECMWFForecastProvider(lat=19.02, lon=72.845).get()
+    call = _FakeClient.last_call
+    assert call["params"]["latitude"] == pytest.approx(19.02)
+    assert call["params"]["longitude"] == pytest.approx(72.845)
+    assert call["params"]["hourly"] == "precipitation"
+
+
+def test_ecmwf_provider_missing_precipitation_raises(monkeypatch):
+    times, _ = _future_hourly(3)
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times}}))
+    with pytest.raises(ProviderUnavailable, match="precipitation"):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_malformed_response_raises(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"unexpected": "shape"}))
+    with pytest.raises(ProviderUnavailable, match="hourly"):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_mismatched_array_lengths_raises(monkeypatch):
+    times, mm = _future_hourly(3)
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm[:2]}}))
+    with pytest.raises(ProviderUnavailable, match="mismatched"):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_null_precipitation_in_needed_window_raises(monkeypatch):
+    times, mm = _future_hourly(3)
+    mm[1] = None
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm}}))
+    with pytest.raises(ProviderUnavailable, match="null"):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_insufficient_forecast_horizon_raises_not_zero_filled(monkeypatch):
+    """No fake fallback: fewer than 3 real future hourly values must raise, never be zero-filled to look
+    like 'no rain' for the missing hour(s)."""
+    times, mm = _future_hourly(2)  # only 2 usable hours, engine window needs 3
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm}}))
+    with pytest.raises(ProviderUnavailable, match="3"):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_api_failure_raises_unavailable(monkeypatch):
+    class _RaisingClient(_FakeClient):
+        def get(self, url, params=None):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(__import__("httpx"), "Client", _RaisingClient)
+    with pytest.raises(ProviderUnavailable):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_timeout_raises_unavailable(monkeypatch):
+    import httpx
+
+    class _TimeoutClient(_FakeClient):
+        def get(self, url, params=None):
+            raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(httpx, "Client", _TimeoutClient)
+    with pytest.raises(ProviderUnavailable):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_http_error_raises_unavailable(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(500, {"error": "upstream failure"}))
+    with pytest.raises(ProviderUnavailable):
+        ECMWFForecastProvider().get()
+
+
+def test_ecmwf_provider_wrong_scenario_id_raises_keyerror():
+    with pytest.raises(KeyError):
+        ECMWFForecastProvider().get("heavy")
+
+
+def test_ecmwf_provider_caches_within_ttl(monkeypatch):
+    times, mm = _future_hourly(3, mm=(1.0, 1.0, 1.0))
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times, "precipitation": mm}}))
+    prov = ECMWFForecastProvider()
+    prov.get()
+    times2, mm2 = _future_hourly(3, mm=(99.0, 99.0, 99.0))  # would change the result if re-fetched
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, {"hourly": {"time": times2, "precipitation": mm2}}))
+    scen2, _ = prov.get()
+    assert scen2.intensity_mm_h[0] == pytest.approx(1.0), "cached value must be reused within TTL, not re-fetched"
+    prov.clear_cache()
+    scen3, _ = prov.get()
+    assert scen3.intensity_mm_h[0] == pytest.approx(99.0), "clear_cache() must force a fresh fetch"
+
+
+def test_ecmwf_provider_never_used_for_external_nowcast_or_live_id():
+    """ECMWFForecastProvider stays a separate, distinct class -- it only ever serves ECMWF_ID, and is not
+    conflated with IMDObservationProvider (LIVE_ID) or the inert ExternalNowcastProvider."""
+    providers = list_providers()
+    assert providers[ECMWF_ID] is not providers[LIVE_ID]
+    assert providers[ECMWF_ID] is not providers["external_nowcast"]
+    assert isinstance(providers[ECMWF_ID], ECMWFForecastProvider)
+
+
+def test_existing_providers_unaffected_by_ecmwf_wiring():
+    """Regression: adding ECMWFForecastProvider must not change behaviour of the existing providers."""
+    scen, meta = ScenarioProvider().get("heavy")
+    assert scen.id == "heavy" and meta.source_type == "scenario"
+    scen2, meta2 = HistoricalReplayProvider().get("july2005")
+    assert scen2.id == "july2005" and meta2.source_type == "historical_replay"
+    with pytest.raises(NotImplementedError):
+        ExternalNowcastProvider().get()

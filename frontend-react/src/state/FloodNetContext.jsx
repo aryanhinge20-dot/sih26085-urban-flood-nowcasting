@@ -20,6 +20,12 @@ export const SIMULATE_STAGES = [
 // the exact same POST /api/simulate contract as every other scenario, never a second data path.
 export const LIVE_ID = 'live'
 
+// Reserved scenario id for an ECMWF NWP forecast run (floodnet/rainfall/provider.py::ECMWF_ID) -- a
+// TEMPORARY rainfall source (Open-Meteo, ECMWF IFS model) used while official IMD API access is pending.
+// Routed through the exact same POST /api/simulate contract as every other scenario. Must never be
+// conflated with LIVE_ID in the UI: this is an NWP FORECAST, not an IMD observation, not a radar nowcast.
+export const ECMWF_ID = 'ecmwf'
+
 // A failed live attempt is either "not configured" (no IMD_API_KEY -- the expected, common case right now)
 // or "configured but the request itself failed" (network/parse error) -- api/main.py's 503 detail always
 // names IMD_API_KEY for the former, so that substring is the one signal the frontend needs. Never leaks
@@ -30,6 +36,17 @@ function classifyLiveFailure(e) {
     return { status: 'unavailable', message: 'IMD API credentials are not configured.' }
   }
   return { status: 'error', message: 'IMD request failed.' }
+}
+
+// ECMWF needs no credentials, so a failure is always "the request/parse itself failed" (Open-Meteo
+// unreachable, timed out, or returned an insufficient/malformed forecast) -- api/main.py's 503 detail always
+// names "Open-Meteo" for this provider (see ECMWFForecastProvider), which is the one signal the frontend
+// needs to distinguish this from an unrelated failure. Never a silent fallback to synthetic rainfall.
+function classifyEcmwfFailure(e) {
+  if (e?.status === 503 && /Open-Meteo/.test(e.message || '')) {
+    return { status: 'error', message: e.message }
+  }
+  return { status: 'error', message: 'ECMWF forecast request failed.' }
 }
 
 const DEFAULT_LAYERS = {
@@ -79,6 +96,10 @@ export function FloodNetProvider({ children }) {
   // screen). status: null (never attempted this session) | 'success' | 'unavailable' (no credentials) |
   // 'error' (credentials configured but the request/parse failed).
   const [liveAttempt, setLiveAttempt] = useState({ status: null, message: null, timestamp: null })
+
+  // Same idea as `liveAttempt`, tracked separately so a failed ECMWF attempt never touches (or is confused
+  // with) live IMD status, and vice versa. status: null (never attempted) | 'success' | 'error'.
+  const [ecmwfAttempt, setEcmwfAttempt] = useState({ status: null, message: null, timestamp: null })
 
   const [selectedSegId, setSelectedSegId] = useState(null)
   const [explain, setExplain] = useState(null)
@@ -160,6 +181,7 @@ export function FloodNetProvider({ children }) {
     async (horizonMin = 180) => {
       if (!scenarioId) return
       const isLive = scenarioId === LIVE_ID
+      const isEcmwf = scenarioId === ECMWF_ID
       setSimulating(true)
       setSimError(null)
       startStageCycle()
@@ -177,12 +199,20 @@ export function FloodNetProvider({ children }) {
             timestamp: res.provenance?.rainfall_source?.timestamp ?? null,
           })
         }
+        if (isEcmwf) {
+          setEcmwfAttempt({
+            status: 'success',
+            message: 'ECMWF forecast received',
+            timestamp: res.provenance?.rainfall_source?.timestamp ?? null,
+          })
+        }
       } catch (e) {
         setSimError(e.message)
         notify(e.message)
-        // A failed LIVE attempt must never disturb whatever scenario/replay run is already on screen --
-        // applyRun() above was simply never called, so `run`/`frame`/the map all stay exactly as they were.
+        // A failed LIVE/ECMWF attempt must never disturb whatever scenario/replay run is already on screen
+        // -- applyRun() above was simply never called, so `run`/`frame`/the map all stay exactly as they were.
         if (isLive) setLiveAttempt(classifyLiveFailure(e))
+        if (isEcmwf) setEcmwfAttempt(classifyEcmwfFailure(e))
       } finally {
         stopStageCycle()
         setSimulating(false)
@@ -382,6 +412,7 @@ export function FloodNetProvider({ children }) {
       simStageIdx,
       simError,
       liveAttempt,
+      ecmwfAttempt,
       runSimulation,
       runCompare,
       selectedSegId,
@@ -402,7 +433,7 @@ export function FloodNetProvider({ children }) {
     [
       meta, status, provenance, scenarios, currentScenario, scenarioId, blockage, bootLoading, bootError,
       roads, topology, hotspots, terrain, run, compareResult, series, frame, currentT, playing, simulating,
-      simStageIdx, simError, liveAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
+      simStageIdx, simError, liveAttempt, ecmwfAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
       explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, layers, toggleLayer, notice, notify,
     ],
   )
