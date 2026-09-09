@@ -199,6 +199,26 @@ Copy `.env.example` to `.env` and fill in `IMD_API_KEY` once a real key is obtai
 not self-service). **No real credential is committed anywhere in this repository**; `.env` is listed in
 `.gitignore`. No frontend or other backend code needs to change when a key is added — see §11.
 
+### How to configure IMD live observations (operator steps)
+
+1. **Obtain the credential.** Not self-service — per §3, contact IMD's nodal officer for `api.imd.gov.in`
+   (Dr. Sankar Nath, `sankar.nath@imd.gov.in`) and complete IMD's own registration/terms-of-use process.
+   This project has not obtained one; no URL, contact, or process beyond what §3 already cites from IMD's
+   own materials is asserted here.
+2. **Place it.** At the repo root: `cp .env.example .env`, then set `IMD_API_KEY=<the real key>` in `.env`.
+   Never place it in any tracked file, command-line argument, or commit message.
+3. **Environment variable name:** `IMD_API_KEY` (optionally `IMD_STATION_ID`, `IMD_API_KEY_HEADER` — see the
+   table above). Loaded automatically at backend startup by `floodnet/config.py`'s `.env` reader; no other
+   setup needed. Restart the backend process after changing `.env` (it's read once at import time).
+4. **Verify configuration** (no live network call, so this is always safe/cheap to check):
+   `curl http://localhost:8000/api/status` → look for
+   `{"id":"live", "available": true, ...}` in `rainfall_providers` (it reads `{"available": false, "reason":
+   "IMD_API_KEY not configured"}` until a key is set).
+5. **Run the opt-in live smoke test** once configured:
+   `cd backend && .venv/Scripts/python.exe -m pytest tests/test_imd_live_smoke.py -v -m live`
+   (it is skipped automatically, with an explanatory reason, whenever `IMD_API_KEY` is not set — normal
+   `pytest tests` never requires or attempts to reach a real IMD credential).
+
 ## 11. Dashboard integration (added after this audit — "LIVE OBSERVATION" UI)
 
 "Live Observation" is now a selectable entry in the existing scenario dropdown (synthesised client-side from
