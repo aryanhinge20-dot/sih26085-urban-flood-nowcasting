@@ -3,6 +3,7 @@ import Header from './components/Header/Header.jsx'
 import MapView from './components/MapView/MapView.jsx'
 import ScenarioPanel from './components/ScenarioPanel/ScenarioPanel.jsx'
 import LayerControl from './components/LayerControl/LayerControl.jsx'
+import AlertsPanel from './components/AlertsPanel/AlertsPanel.jsx'
 import MetricsPanel from './components/MetricsPanel/MetricsPanel.jsx'
 import FloodedStreets from './components/FloodedStreets/FloodedStreets.jsx'
 import WhyFloodedPanel from './components/WhyFloodedPanel/WhyFloodedPanel.jsx'
@@ -28,6 +29,7 @@ function Dashboard() {
       </aside>
 
       <aside className={`${styles.rightPanel} glass-panel scroll-y`}>
+        <AlertsPanel />
         <MetricsPanel />
         <FloodedStreets />
         <WhyFloodedPanel />

@@ -265,13 +265,26 @@ export default function MapView() {
   }, [frame, meta])
 
   // re-highlight the selected segment without waiting for the next frame fetch (e.g. selection made from
-  // the FloodedStreets list rather than a map click)
+  // the FloodedStreets/AlertsPanel/"Top flood priorities" lists rather than a map click), and pan the map
+  // to it -- "jump to the relevant map location" for alert/priority clicks.
   useEffect(() => {
+    const map = mapRef.current
+    let selectedLayer = null
     segIndexRef.current.forEach((pl, segId) => {
       const isSelected = String(segId) === String(selectedSegId)
       pl.setStyle({ color: isSelected ? '#ffffff' : pl.options.color, weight: isSelected ? 7 : pl.options.weight })
-      if (isSelected) pl.bringToFront()
+      if (isSelected) {
+        pl.bringToFront()
+        selectedLayer = pl
+      }
     })
+    if (map && selectedLayer) {
+      try {
+        map.fitBounds(selectedLayer.getBounds().pad(0.6), { maxZoom: 17 })
+      } catch {
+        /* degenerate (single-point) geometry -- ignore, highlighting already happened */
+      }
+    }
   }, [selectedSegId])
 
   // ---------------------------------------------------------------- route

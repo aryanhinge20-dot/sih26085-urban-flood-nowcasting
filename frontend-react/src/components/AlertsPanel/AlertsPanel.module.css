@@ -1,0 +1,133 @@
+.section {
+  padding: 12px 2px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.count {
+  font-family: var(--mono);
+  color: var(--text);
+  font-weight: 700;
+}
+.empty {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+.disclaimer {
+  font-size: 9.5px;
+  color: var(--text-faint);
+  margin-top: 6px;
+  font-style: italic;
+}
+
+.list {
+  list-style: none;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.alert {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 9px;
+  cursor: pointer;
+}
+.alert:hover {
+  background: var(--bg-hover);
+}
+.alertHead {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.icon {
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.tierTag {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.stateTag {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-faint);
+  letter-spacing: 0.4px;
+}
+.stateTag_ACTIVE {
+  color: var(--sev-severe);
+}
+.body {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.body b {
+  color: var(--text);
+  font-family: var(--mono);
+}
+.actions {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-faint);
+  line-height: 1.7;
+}
+
+.priorityHeading {
+  margin-top: 16px;
+}
+.priorityList {
+  list-style: none;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.priorityRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+}
+.priorityRow:hover {
+  background: var(--bg-hover);
+}
+.priorityRank {
+  font-family: var(--mono);
+  color: var(--text-faint);
+  font-size: 10px;
+  width: 16px;
+  flex: 0 0 auto;
+}
+.priorityName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.priorityCat {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+.priorityMeta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
