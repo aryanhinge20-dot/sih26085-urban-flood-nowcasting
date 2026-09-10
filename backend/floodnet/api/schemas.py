@@ -41,6 +41,9 @@ class RouteRequest(BaseModel):
     t_min: float = Field(default=0.0, ge=0.0)
     vehicle: str = "car"
     run_id: Optional[str] = None
+    n_candidates: int = Field(default=3, ge=2, le=5,
+                              description="requested number of alternative route candidates; only used by "
+                                          "POST /api/route/alternatives, ignored by POST /api/route")
 
     @field_validator("origin", "dest")
     @classmethod

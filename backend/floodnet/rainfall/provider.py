@@ -6,7 +6,7 @@ producing a `RainfallScenario`, plus a `RainfallSourceMeta` describing where tha
 from, so callers (the API layer) can ask "give me rainfall input X" without knowing whether X is a hardcoded
 design storm, a replayed historical event, or (in the future) a live nowcast feed.
 
-Five providers are wired today:
+Six providers are wired today:
   - `ScenarioProvider`          SYNTHETIC design storms: moderate / heavy / cloudburst.
   - `HistoricalReplayProvider`  REAL, transcribed historical event: 26 July 2005 (Chitale Committee report).
   - `IMDObservationProvider`    REAL observed rainfall from the IMD API Management Platform
@@ -20,9 +20,14 @@ Five providers are wired today:
                                  numerical-weather-prediction FORECAST, not a radar nowcast and not an IMD
                                  product; never labelled as either. Raises `ProviderUnavailable` (not a
                                  fabricated value) if the call fails or returns insufficient data.
-  - `ExternalNowcastProvider`   inert interface stub for a future IMD/radar/pysteps adapter. Calling `.get()`
-                                 raises `NotImplementedError` -- no live nowcast source is connected in this
-                                 prototype, and this module will never fabricate one.
+  - `IMDRadarNowcastProvider`   DISABLED-BY-DEFAULT integration boundary for IMD Doppler Weather Radar. It is
+                                 the honest place a radar feed would attach, and it is deliberately inert:
+                                 `.get()` always raises `ProviderUnavailable` with an "ACCESS PENDING -- ..."
+                                 reason. No radar image is fetched, no pixel is decoded, no rainfall value is
+                                 invented or borrowed from another source. See decision D-14
+                                 (`docs/DECISIONS.md`) and `docs/LIVE_RAINFALL_AUDIT.md` §8b/§8c.
+  - `ExternalNowcastProvider`   DEPRECATED, retained only for import compatibility -- superseded by
+                                 `IMDRadarNowcastProvider`. Calling `.get()` raises `NotImplementedError`.
 
 No rainfall data is invented or duplicated here: `ScenarioProvider` and `HistoricalReplayProvider` both
 delegate to the existing `floodnet.data.scenarios.scenarios()` dict (see that module's docstring for the
@@ -53,12 +58,15 @@ SCENARIO_IDS: tuple[str, ...] = ("moderate", "heavy", "cloudburst")
 HISTORICAL_REPLAY_ID = "july2005"
 LIVE_ID = "live"
 ECMWF_ID = "ecmwf"
+RADAR_ID = "imd_radar"
 
 
 @dataclass(frozen=True)
 class RainfallSourceMeta:
     """Metadata about WHERE a `RainfallScenario`'s numbers came from (not what they are)."""
-    source_type: str            # "scenario" | "historical_replay" | "live_observation" | "external_nowcast"
+    source_type: str            # "scenario" | "historical_replay" | "live_observation" | "ecmwf_forecast"
+                                  # | "radar_nowcast" (reported by provider_status() only -- the radar
+                                  # boundary never produces a scenario, so it never produces a meta either)
     source_name: str
     timestamp: str               # ISO8601 fetch/production time; "N/A (design storm)" for synthetic scenarios,
                                   # or the real historical event date for a replay
@@ -81,11 +89,13 @@ class RainfallSourceMeta:
 
 class ProviderUnavailable(RuntimeError):
     """Raised by a REAL (non-stub) provider that cannot serve a value right now -- missing credentials, the
-    upstream call failed, or the response couldn't be parsed. Distinct from `NotImplementedError` (raised by
-    `ExternalNowcastProvider`, where no adapter exists at all): this means a working adapter exists but this
-    particular attempt did not succeed. Callers must treat this as "show the user the source is unavailable
-    and let them pick replay/scenario instead" -- never as a signal to substitute synthetic data while still
-    claiming LIVE."""
+    upstream call failed, the credentials are wrong, the source is deliberately disabled, or the response
+    couldn't be parsed. Distinct from `NotImplementedError` (raised by the deprecated
+    `ExternalNowcastProvider`, where no adapter exists at all): this means the provider exists and is wired,
+    but this particular attempt cannot legitimately produce a value. Callers must treat this as "show the
+    user the source is unavailable and let them pick replay/scenario instead" -- never as a signal to
+    substitute synthetic data while still claiming LIVE, and never as a signal to fall through to a
+    different provider under the requested source's label."""
 
 
 class RainfallProvider(ABC):
@@ -165,11 +175,24 @@ class IMDObservationProvider(RainfallProvider):
     `Tag.ESTIMATED`, not `Tag.REAL`: the OBSERVATION is real, the 3h SHAPE is a stated, simple assumption
     layered on top of it -- exactly the same "REAL input + stated derivation rule = ESTIMATED" pattern
     already used elsewhere in this codebase (e.g. Manning's n, node inverts).
+
+    AUTHENTICATION (resolved -- two DIFFERENT credentials, not one value sent twice)
+    --------------------------------------------------------------------------------
+    The IMD API Management Platform evaluates auth BEFORE routing (proven with a nonsense-path control that
+    returned a byte-identical 401), and it requires BOTH headers on every request:
+        X-API-Key:     <subscription key>     -> IMD_API_KEY
+        Authorization: Bearer <JWT>            -> IMD_API_TOKEN   (a different value; NOT the API key)
+    An earlier version of this class sent the single `IMD_API_KEY` value as both headers and additionally as
+    an `apikey` query parameter, because the transmission mechanism was then unverified. That is now settled:
+    the `apikey` query parameter is NOT accepted (a request carrying it and nothing else returns
+    `{"error":"API key missing"}`), so it has been removed -- it could never authenticate and only risked
+    leaking the key into URLs, logs and proxies. See docs/LIVE_RAINFALL_AUDIT.md.
     """
 
     STATION_ID_ENV = "IMD_STATION_ID"
-    API_KEY_ENV = "IMD_API_KEY"
-    API_KEY_HEADER_ENV = "IMD_API_KEY_HEADER"     # see note below -- transmission mechanism unverified
+    API_KEY_ENV = "IMD_API_KEY"                   # value of the X-API-Key header (subscription key)
+    API_TOKEN_ENV = "IMD_API_TOKEN"               # value of the Authorization: Bearer header (JWT)
+    API_KEY_HEADER_ENV = "IMD_API_KEY_HEADER"     # override the API-key header NAME only; default X-API-Key
     DEFAULT_STATION_ID = "43003"                  # Mumbai-Santacruz; see audit doc for how this was verified
     BASE_URL = "https://api.imd.gov.in/api/v1"
     TIMEOUT_S = 10.0
@@ -178,15 +201,25 @@ class IMDObservationProvider(RainfallProvider):
                             # that does not change faster than this, so re-fetching more often than every
                             # ~10 min would only hammer the API without adding real information.
 
-    def __init__(self, station_id: Optional[str] = None, api_key: Optional[str] = None):
+    def __init__(self, station_id: Optional[str] = None, api_key: Optional[str] = None,
+                 api_token: Optional[str] = None):
         self.station_id = station_id or os.environ.get(self.STATION_ID_ENV, self.DEFAULT_STATION_ID)
         self._api_key = api_key  # if None, read fresh from the environment on every call (see _api_key_now)
+        self._api_token = api_token
         self._cache: Optional[tuple[float, RainfallScenario, RainfallSourceMeta]] = None
 
     def _api_key_now(self) -> Optional[str]:
         return self._api_key if self._api_key is not None else os.environ.get(self.API_KEY_ENV)
 
+    def _api_token_now(self) -> Optional[str]:
+        return self._api_token if self._api_token is not None else os.environ.get(self.API_TOKEN_ENV)
+
     def is_configured(self) -> bool:
+        """True when the API key is present. The JWT (`IMD_API_TOKEN`) is a SECOND, separate credential the
+        platform also requires; a key-only configuration is reported as configured here (so the operator sees
+        the same "not configured" message they always did when nothing is set) but the request will be
+        rejected by IMD with a specific 401 that `_auth_failure_reason` turns into a precise diagnostic --
+        never into a fabricated rainfall value."""
         return bool(self._api_key_now())
 
     def clear_cache(self) -> None:
@@ -200,43 +233,81 @@ class IMDObservationProvider(RainfallProvider):
         if not key:
             raise ProviderUnavailable(
                 f"{self.API_KEY_ENV} is not configured -- live IMD data is disabled, not faked. "
-                f"Set it in .env (see .env.example) to enable. Registration is not self-service: see "
+                f"Live access needs BOTH {self.API_KEY_ENV} (sent as X-API-Key) and {self.API_TOKEN_ENV} "
+                f"(sent as Authorization: Bearer <JWT>) -- they are different credentials. "
+                f"Set them in .env (see .env.example) to enable. Registration is not self-service: see "
                 f"docs/LIVE_RAINFALL_AUDIT.md.")
         import time
         now = time.monotonic()
         if self._cache is not None and (now - self._cache[0]) < self.CACHE_TTL_S:
             return self._cache[1], self._cache[2]
-        payload, retrieved_at = self._fetch_current_wx(key)
+        payload, retrieved_at = self._fetch_current_wx(key, self._api_token_now())
         scen, meta = self._normalize(payload, retrieved_at)
         self._cache = (now, scen, meta)
         return scen, meta
 
-    def _fetch_current_wx(self, key: str) -> tuple[dict, datetime]:
+    def _auth_failure_reason(self, body: object) -> str:
+        """Turn one of IMD's three distinct HTTP 401 bodies into a diagnostic that names the exact credential
+        at fault. These bodies are precise signals -- the platform authenticates before routing, so they say
+        which of the two required credentials the gateway objected to, not merely "unauthorised".
+
+        Never includes a credential value in its output (this text reaches the HTTP client verbatim).
+        """
+        msg = ""
+        if isinstance(body, dict):
+            msg = str(body.get("error") or body.get("message") or "").strip().lower()
+        elif isinstance(body, str):
+            msg = body.strip().lower()
+        if "api key" in msg:                       # {"error": "API key missing"}
+            return (f"IMD returned 401 'API key missing': the X-API-Key header was absent or not recognised. "
+                    f"Check {self.API_KEY_ENV} (this is the subscription key, not the JWT).")
+        if "authorization header" in msg:          # {"error": "Authorization header missing or invalid"}
+            return (f"IMD returned 401 'Authorization header missing or invalid': the "
+                    f"'Authorization: Bearer <JWT>' header was absent or malformed. Set {self.API_TOKEN_ENV} "
+                    f"to the JWT issued with your account -- it is a DIFFERENT value from {self.API_KEY_ENV}.")
+        if "jwt" in msg or "expired" in msg:       # {"error": "Invalid or expired JWT token"}
+            return (f"IMD returned 401 'Invalid or expired JWT token': the X-API-Key was accepted but "
+                    f"{self.API_TOKEN_ENV} is wrong or has expired -- re-issue the token.")
+        return "IMD returned HTTP 401 with an unrecognised authentication error body."
+
+    def _fetch_current_wx(self, key: str, token: Optional[str]) -> tuple[dict, datetime]:
         import httpx
-        # NOTE ON AUTH: IMD's published materials (api_reference.html, apis.php, the API_doc.pdf) confirm a
-        # key is required (empirically: a real unauthenticated call to this exact endpoint returns HTTP 401
-        # {"error":"API key missing"}) but do not document HOW the key is transmitted (header vs query
-        # param). We send it both ways -- an `Authorization: Bearer` header, a custom header (name
-        # configurable via IMD_API_KEY_HEADER, default X-API-Key), AND an `apikey` query parameter -- so
-        # whichever convention IMD actually uses will pick it up; harmless if the others are ignored. This
-        # is the one genuinely unverified detail in this integration (see the audit doc) and should be
-        # confirmed against IMD's real onboarding documentation once a key is issued.
+        # AUTH (resolved -- see the class docstring): the platform requires BOTH an X-API-Key header (the
+        # subscription key) and an Authorization: Bearer <JWT> header, carrying DIFFERENT values. The
+        # `apikey` query parameter is not accepted and is no longer sent. If the JWT is missing we still
+        # make the request rather than guessing a value: IMD's own 401 body then tells the operator exactly
+        # which credential is at fault (see _auth_failure_reason), which is more useful -- and more honest --
+        # than a locally invented diagnosis.
         header_name = os.environ.get(self.API_KEY_HEADER_ENV, "X-API-Key")
-        headers = {"Authorization": f"Bearer {key}", header_name: key}
+        headers = {header_name: key}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            log.warning("%s is not set: sending %s only. IMD requires an Authorization: Bearer <JWT> header "
+                        "as well and will very likely reject this request with HTTP 401.",
+                        self.API_TOKEN_ENV, header_name)
         url = f"{self.BASE_URL}/current_wx"
         status_code: Optional[int] = None
+        auth_reason: Optional[str] = None
         try:
             with httpx.Client(headers=headers, timeout=self.TIMEOUT_S) as client:
-                r = client.get(url, params={"id": self.station_id, "apikey": key})
+                r = client.get(url, params={"id": self.station_id})
                 status_code = r.status_code
+                if status_code == 401:
+                    try:
+                        auth_reason = self._auth_failure_reason(r.json())
+                    except Exception:  # noqa: BLE001 -- body wasn't JSON; fall back to the generic 401 text
+                        auth_reason = self._auth_failure_reason(None)
                 r.raise_for_status()
                 data = r.json()
         except Exception as ex:  # noqa: BLE001
-            # SECURITY: never put `ex` (or the request URL) into the message that reaches the HTTP client --
-            # the key is sent as a query parameter (see note above), so httpx's own exception text for a
-            # failed request includes the full URL *with the key in it*. Full detail (safe: server-side only)
-            # goes to the log; only a sanitised, key-free summary is raised/returned to callers.
+            # SECURITY: never put `ex` (or the request URL) into the message that reaches the HTTP client.
+            # Credentials now travel in headers only (never in the URL), but httpx exception text embeds the
+            # full request URL and this defensive sanitisation is kept regardless: full detail (safe:
+            # server-side only) goes to the log, only a sanitised, credential-free summary is raised.
             log.warning("IMD current_wx request failed (station %s): %s", self.station_id, ex)
+            if auth_reason:
+                raise ProviderUnavailable(f"{auth_reason} (station {self.station_id})") from None
             reason = f"HTTP {status_code}" if status_code else type(ex).__name__
             raise ProviderUnavailable(f"IMD current_wx request failed (station {self.station_id}): {reason}") from None
         return data, datetime.now(timezone.utc)
@@ -452,29 +523,127 @@ class ECMWFForecastProvider(RainfallProvider):
         return scen, meta
 
 
-class ExternalNowcastProvider(RainfallProvider):
-    """Interface stub for a future live rainfall-nowcast source (e.g. IMD radar QPE/QPF, a pysteps
-    extrapolation nowcast, or another NWP feed).
+class IMDRadarNowcastProvider(RainfallProvider):
+    """Integration boundary for IMD Doppler Weather Radar (DWR Mumbai) -- WIRED, DOCUMENTED, AND DISABLED
+    BY DEFAULT. It never produces a rainfall value; `.get()` always raises `ProviderUnavailable`.
 
-    NOT WIRED IN THIS PROTOTYPE -- intentionally inert; no HTTP client or external library is imported or
-    referenced here. A real implementation would need to:
-      - fetch a gridded or point rainfall INTENSITY time series (mm/h) covering the pilot bbox/period, at
-        whatever native temporal resolution the source provides;
-      - record the FETCH TIMESTAMP (when the nowcast was produced/pulled, distinct from the valid period it
-        forecasts);
-      - record the FORECAST HORIZON the source actually supports (nowcasts are typically short-lived, e.g.
-        0-2h for radar extrapolation, vs multi-day for an NWP feed);
-      - resample/regrid that into the same `RainfallScenario` shape (`t_s` seconds, `intensity_mm_h` mm/h)
-        the engine already consumes, tagged with `provenance.Tag.NWP` (model output) or a REAL radar tag as
-        appropriate -- never SYNTHETIC.
+    This class exists so that (a) radar has one honest, named place to attach if access is ever granted, and
+    (b) `/api/status` can say "ACCESS PENDING" out loud instead of radar being silently absent. It fetches
+    nothing: no HTTP client is imported, no image is downloaded, no pixel is decoded, no capture job exists.
+
+    WHY IT IS DISABLED (decision D-14, docs/DECISIONS.md; evidence docs/LIVE_RAINFALL_AUDIT.md §8b/§8c)
+    -----------------------------------------------------------------------------------------------------
+    Two independent investigations (a specialist audit and an adversarial re-check, both against official IMD
+    sources) concluded that radar is BLOCKED for defensible quantitative use:
+
+    1. NO DOCUMENTED ENDPOINT. IMD's API reference indexes 28 APIs, but the document body ends at §20.
+       "Radar Image" (`#api-25`) is a dead anchor: no URL, no parameters, no response schema is published
+       anywhere. There is nothing to implement against.
+    2. EXISTENCE CANNOT EVEN BE PROBED. The platform evaluates auth BEFORE routing (proven with a
+       nonsense-path control returning a byte-identical 401), so without a credential one cannot tell a real
+       endpoint from a typo. Auth needs two headers (X-API-Key and Authorization: Bearer <JWT>).
+    3. THE PUBLIC IMAGERY IS NOT A QUANTITATIVE INPUT. `mausam.imd.gov.in/Radar/sri_mum.gif` genuinely is
+       Surface Rainfall Intensity in mm/hr with its Z-R relation printed in-band (Z = 152 * R^1.5) -- but its
+       top colour bin is OPEN-ENDED at ">100 mm/h", below FloodNet's own `cloudburst` (120 mm/h) and
+       `july2005` (190.3 mm/h) intensities, so precisely the events this project exists to model would be
+       clipped to an unknown value. Add ~+-3.33 mm/h bin quantisation, ~12.5% of the pilot footprint hidden
+       under the drawn coastline, 30-40 min latency, and a rain rate inferred at 2 km altitude. Decoding a
+       rendered picture is a lossy reconstruction of a visualisation, not an observation, and must never
+       carry an observation-class provenance tag.
+    4. NO ARCHIVE, SO NO HINDCAST. Directory listings return 403 and there are ~3 Wayback captures in six
+       years; a historical radar-driven validation run is impossible from free sources.
+    5. LICENCE UNRESOLVED. `copyRightPolicy.php`/`termscondition.php` 404 while `disclaimer.php` asserts IMD
+       copyright with no grant; the official supply route (`radarapi.imd.gov.in`, Radar Division) requires an
+       account, a written data request and payment. No harvesting has been started, deliberately.
+    6. THE ENGINE COULD NOT INGEST IT ANYWAY (decision D-15). `contracts.RainfallScenario.intensity_mm_h` is
+       `[T]` and `intensity_at()` returns a scalar `float`: rainfall is spatially uniform by construction for
+       every provider, so a gridded radar field has nowhere to go without a contract change.
+
+    WHAT WOULD BE REQUIRED TO ENABLE IT (all of these, not any of them)
+    -------------------------------------------------------------------
+    a. A written, published (or licensed) radar data endpoint from IMD with a real response schema -- product
+       type, units, grid definition, timestamps -- not a rendered image.
+    b. Credentials for it: `IMD_API_KEY` (X-API-Key) AND `IMD_API_TOKEN` (Bearer JWT).
+    c. A resolved licence permitting programmatic retrieval and retention for this use.
+    d. A `RainfallScenario` that can carry a gridded field (D-15) if the spatial resolution is to mean
+       anything; until then a radar feed could only be area-averaged, which must be stated if ever done.
+    e. Then, and only then: set `IMD_RADAR_ENABLED=1` and implement `_fetch()` in place of the raise below,
+       tagging output `Tag.REAL` for a true QPE product or `Tag.ESTIMATED` for anything derived.
+
+    FAILURE BEHAVIOUR: raises `ProviderUnavailable` -- the same contract the live/ECMWF providers use, which
+    callers must treat as "tell the user this source is unavailable". It never falls through to another
+    provider and never returns a substituted or synthesised series under a radar label.
+    """
+
+    ENABLED_ENV = "IMD_RADAR_ENABLED"
+    API_KEY_ENV = IMDObservationProvider.API_KEY_ENV      # same platform credentials as the live provider
+    API_TOKEN_ENV = IMDObservationProvider.API_TOKEN_ENV
+    AUDIT_DOC = "docs/LIVE_RAINFALL_AUDIT.md"
+    _TRUTHY = ("1", "true", "yes", "on", "enabled")
+
+    # The single sentence a status consumer sees. Deliberately leads with ACCESS PENDING and points at the
+    # evidence, so an operator can check the claim rather than take this class's word for it.
+    STATUS_REASON = (
+        "ACCESS PENDING -- IMD Doppler Weather Radar is not connected and is disabled by default "
+        "(IMD_RADAR_ENABLED unset). IMD publishes no documented radar data endpoint (the API reference's "
+        "'Radar Image' entry is a dead anchor; the document body ends at section 20), and the public radar "
+        "imagery is a rendered picture whose top intensity bin is open-ended at >100 mm/h -- below this "
+        "project's own cloudburst (120 mm/h) and 2005 (190.3 mm/h) intensities -- so it is not usable as a "
+        "quantitative input. No radar value is estimated, decoded or substituted from another source. "
+        "Evidence: docs/LIVE_RAINFALL_AUDIT.md sections 8b/8c; decision D-14 in docs/DECISIONS.md.")
+
+    def is_enabled(self) -> bool:
+        """True only if an operator has explicitly set the enable flag. Default (unset) is False: this
+        provider cannot activate by accident, e.g. because IMD credentials happened to be configured for the
+        separate `live` observation path."""
+        return os.environ.get(self.ENABLED_ENV, "").strip().lower() in self._TRUTHY
+
+    def is_configured(self) -> bool:
+        """Both platform credentials present. Note this is NOT sufficient to enable the provider -- the
+        explicit flag is required as well (see `is_enabled`)."""
+        return bool(os.environ.get(self.API_KEY_ENV)) and bool(os.environ.get(self.API_TOKEN_ENV))
+
+    def unavailable_reason(self) -> str:
+        """The exact reason string reported by `provider_status()` and raised by `.get()`."""
+        if not self.is_enabled():
+            return self.STATUS_REASON
+        # Flag set: report what is still missing, and still refuse -- setting a flag cannot conjure an
+        # endpoint that IMD does not publish.
+        missing = []
+        if not os.environ.get(self.API_KEY_ENV):
+            missing.append(self.API_KEY_ENV)
+        if not os.environ.get(self.API_TOKEN_ENV):
+            missing.append(self.API_TOKEN_ENV)
+        creds = f" Missing credentials: {', '.join(missing)}." if missing else ""
+        return (f"ACCESS PENDING -- {self.ENABLED_ENV} is set, but no radar adapter is implemented and none "
+                f"can be: IMD publishes no documented radar data endpoint to call, and the public radar "
+                f"imagery is a rendered picture, not a quantitative rainfall field (see {self.AUDIT_DOC} "
+                f"sections 8b/8c, decision D-14).{creds} Nothing is fabricated or substituted; implement "
+                f"_fetch() only once a real, licensed, documented endpoint exists.")
+
+    def get(self, scenario_id: Optional[str] = None, **kwargs) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        sid = scenario_id or RADAR_ID
+        if sid != RADAR_ID:
+            raise KeyError(f"IMDRadarNowcastProvider only serves {RADAR_ID!r}, got {sid!r}")
+        # Always. There is no code path in this class that returns a RainfallScenario, by design.
+        raise ProviderUnavailable(self.unavailable_reason())
+
+
+class ExternalNowcastProvider(RainfallProvider):
+    """DEPRECATED -- superseded by `IMDRadarNowcastProvider`, which names the actual source, documents why it
+    is off, and reports itself honestly through `provider_status()`.
+
+    Kept only so existing imports (`floodnet.rainfall.__init__`, tests) keep working; still fully inert. Do
+    not wire anything new to this class -- a new source deserves its own named provider, as
+    `IMDRadarNowcastProvider` and `ECMWFForecastProvider` are.
 
     Calling `.get()` raises `NotImplementedError` rather than returning fabricated numbers.
     """
 
     def get(self, scenario_id: Optional[str] = None, **kwargs) -> tuple[RainfallScenario, RainfallSourceMeta]:
         raise NotImplementedError(
-            "ExternalNowcastProvider is an interface stub: no IMD/radar/pysteps adapter is connected in this "
-            "build. Wire a real implementation of RainfallProvider.get() here before use.")
+            "ExternalNowcastProvider is a deprecated, inert interface stub (see IMDRadarNowcastProvider for "
+            "the radar integration boundary). No adapter is connected in this build.")
 
 
 # Module-level singletons: both caching providers keep their last successful fetch internally (see
@@ -483,6 +652,9 @@ class ExternalNowcastProvider(RainfallProvider):
 # never persist across calls.
 _imd_live_provider = IMDObservationProvider()
 _ecmwf_provider = ECMWFForecastProvider()
+# Stateless (it fetches nothing and caches nothing), but shared for the same reason: one object identity for
+# the radar boundary everywhere it is reported.
+_imd_radar_provider = IMDRadarNowcastProvider()
 
 
 def list_providers() -> dict[str, RainfallProvider]:
@@ -493,7 +665,10 @@ def list_providers() -> dict[str, RainfallProvider]:
     `ProviderUnavailable` if `IMD_API_KEY` isn't configured -- that is expected, not an error to hide);
     'ecmwf' -> the shared `ECMWFForecastProvider` (temporary NWP forecast source, may raise
     `ProviderUnavailable` if Open-Meteo is unreachable or returns insufficient data);
-    'external_nowcast' -> the inert `ExternalNowcastProvider`.
+    'imd_radar' -> the shared `IMDRadarNowcastProvider` (disabled-by-default integration boundary; ALWAYS
+    raises `ProviderUnavailable` with an "ACCESS PENDING" reason -- that is its designed behaviour, not a
+    failure, and it must never be swapped for another provider when it raises);
+    'external_nowcast' -> the deprecated, inert `ExternalNowcastProvider`.
     """
     out: dict[str, RainfallProvider] = {}
     scen_provider = ScenarioProvider()
@@ -502,6 +677,7 @@ def list_providers() -> dict[str, RainfallProvider]:
     out[HistoricalReplayProvider.SCENARIO_ID] = HistoricalReplayProvider()
     out[LIVE_ID] = _imd_live_provider
     out[ECMWF_ID] = _ecmwf_provider
+    out[RADAR_ID] = _imd_radar_provider
     out["external_nowcast"] = ExternalNowcastProvider()
     return out
 
@@ -509,8 +685,9 @@ def list_providers() -> dict[str, RainfallProvider]:
 def get_source_meta(scenario_id: str) -> Optional[RainfallSourceMeta]:
     """Convenience for API callers: `RainfallSourceMeta` for a known, currently-servable scenario id, or
     None if unrecognised or unavailable (e.g. a scenario id present in a loaded pilot's scenarios.json that
-    isn't one of the provider-wired ids, the inert 'external_nowcast' stub, or 'live' when IMD_API_KEY isn't
-    configured / the request failed). Use `provider_status()` instead of this function when you need to
+    isn't one of the provider-wired ids, the inert 'external_nowcast' stub, the always-unavailable
+    'imd_radar' boundary, or 'live' when IMD_API_KEY isn't configured / the request failed). Use
+    `provider_status()` instead of this function when you need to
     distinguish "unavailable" from "doesn't exist" (e.g. to show *why* LIVE isn't offered right now)."""
     providers = list_providers()
     p = providers.get(scenario_id)
@@ -524,8 +701,10 @@ def get_source_meta(scenario_id: str) -> Optional[RainfallSourceMeta]:
 
 
 def provider_status() -> list[dict]:
-    """Rainfall sources worth showing to a caller (excludes the fully inert `ExternalNowcastProvider`, which
-    can never work in this build under any configuration). Used by GET /api/status.
+    """Rainfall sources worth showing to a caller (excludes the deprecated `ExternalNowcastProvider`, which
+    names no source and can never work in this build under any configuration; the radar boundary IS listed,
+    permanently unavailable, because "radar is pending" is information an operator needs). Used by
+    GET /api/status.
 
     Unlike `get_source_meta`, this does NOT call `IMDObservationProvider.get()` (which performs a real
     network request) -- a status endpoint that's polled routinely must stay cheap. It reports whether the
@@ -564,4 +743,14 @@ def provider_status() -> list[dict]:
         # possible on demand, not that one has already succeeded this process.
         ecmwf_row.update(available=True, reason="no credentials required; fetched on demand")
     out.append(ecmwf_row)
+
+    # IMD radar: listed so the honest answer to "where is radar?" is visible in the API rather than absent,
+    # and permanently available=False. `unavailable_reason()` is a pure string computation -- no network
+    # call, no credential use -- so a routinely-polled status endpoint stays cheap. This row is never
+    # available=True in this build: see IMDRadarNowcastProvider's docstring and decision D-14.
+    out.append({"id": RADAR_ID, "source_type": "radar_nowcast",
+                "source_name": "IMD Doppler Weather Radar (integration boundary -- not connected)",
+                "data_mode": None, "timestamp": None, "resolution_min": None,
+                "available": False, "reason": _imd_radar_provider.unavailable_reason(),
+                "enabled": _imd_radar_provider.is_enabled()})
     return out

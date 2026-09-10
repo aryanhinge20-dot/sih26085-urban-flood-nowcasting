@@ -8,6 +8,107 @@ import styles from './MapView.module.css'
 
 const PILOT_CENTER = [19.02, 72.845]
 
+// Colours for POST /api/route/alternatives candidate layers, keyed by the candidate's primary objective label
+// (see RoutePlanner.jsx's OBJECTIVE_LABEL for the matching honest UI text -- "fastest" here is DISTANCE-only).
+const OBJECTIVE_COLOR = { safest: '#22c55e', fastest: '#f59e0b', balanced: '#8b5cf6' }
+const DEFAULT_CANDIDATE_COLOR = '#64748b'
+
+// ── drainage node state (three tiers, straight from the solver) ────────────────────────────────────────
+// Each per-frame node dict carries `state`, exactly one of 'normal' | 'at_capacity' | 'surcharging':
+//   surcharging  -- the node spilled water to the street during this frame interval (a real problem).
+//   at_capacity  -- fill_frac >= the solver's own internal full threshold: water has reached street level
+//                   and is blocking upstream flow, but it did NOT spill during the interval.
+//   normal       -- everything else.
+// `fill_frac` / `freeboard_m` are INSTANTANEOUS at the frame boundary, while `state` / `surcharging` are
+// INTERVAL-aware, so a node that spilled early in the interval and then drained legitimately reports
+// state 'surcharging' with a fill_frac well below 1.0. Every tooltip below therefore times its fill
+// number explicitly ("fill at frame end") so the two can never read as a contradiction.
+function nodeStateOf(f) {
+  if (!f) return null
+  if (f.state === 'normal' || f.state === 'at_capacity' || f.state === 'surcharging') return f.state
+  return f.surcharging ? 'surcharging' : 'normal' // defensive fallback for a pre-`state` payload
+}
+
+// Continuous fill encoding on NORMAL nodes only: radius and fill-opacity vary smoothly with fill_frac
+// while the HUE IS HELD at the baseline blue. Deliberately NOT banded -- node depths in this network run
+// from 0.57 m to 4.47 m, so any fixed fill-fraction cut (0.85, say) would mean a wildly different real
+// freeboard from node to node, i.e. the UI would be asserting a threshold the physics does not define.
+const NODE_STYLE_STATIC = { radius: 2.5, color: '#0284c7', weight: 1, fillColor: '#0284c7', fillOpacity: 0.6 }
+
+function nodeStyleFor(f) {
+  const state = nodeStateOf(f)
+  if (state === 'surcharging') {
+    return { radius: 6, color: '#dc2626', weight: 2, fillColor: '#ef4444', fillOpacity: 0.8 }
+  }
+  if (state === 'at_capacity') {
+    // Amber/orange: clearly between calm blue and alarm red, and no pulse -- the pulse is reserved for
+    // nodes that are actually spilling.
+    return { radius: 4.5, color: '#c2410c', weight: 2, fillColor: '#f97316', fillOpacity: 0.85 }
+  }
+  if (!f) return NODE_STYLE_STATIC
+  const fill = Math.max(0, Math.min(1, f.fill_frac ?? 0))
+  return { radius: 2.2 + 1.8 * fill, color: '#0284c7', weight: 1, fillColor: '#0284c7', fillOpacity: 0.32 + 0.5 * fill }
+}
+
+const NODE_STATE_TEXT = {
+  normal: 'NORMAL',
+  at_capacity: 'AT CAPACITY &mdash; water at street level, no spill this interval',
+  surcharging: 'SURCHARGING &mdash; spilled to street during this interval',
+}
+
+// `n` is the static topology node (ground/invert), `f` the per-frame state (undefined before the first frame).
+function nodeTooltip(n, f) {
+  const head = `<b>${n.is_outfall ? 'Outfall' : 'Node'} ${n.id}</b>`
+  const geom = `ground ${(n.ground_m ?? 0).toFixed(2)} m &middot; invert ${(n.invert_m ?? 0).toFixed(2)} m`
+  const state = nodeStateOf(f)
+  if (!state) return `${head}<br>${geom}`
+
+  const rows = [NODE_STATE_TEXT[state]]
+  if (f.freeboard_m != null) {
+    rows.push(
+      f.freeboard_m <= 0
+        ? 'water at street level (0.00 m freeboard)'
+        : `water ${f.freeboard_m.toFixed(2)} m below street level`,
+    )
+  }
+  if (f.fill_frac != null) rows.push(`fill at frame end ${Math.round(Math.max(0, Math.min(1, f.fill_frac)) * 100)}%`)
+  if (f.surcharge_m3 > 0) rows.push(`spilled ${f.surcharge_m3.toFixed(1)} m&sup3; this interval`)
+  if (f.cause) rows.push(`cause: ${f.cause}`)
+  if (f.hgl_m != null) rows.push(`HGL ${f.hgl_m.toFixed(2)} m`)
+  return `${head}<br>${geom}<br>${rows.join('<br>')}`
+}
+
+// Applied both from the per-frame effect and once right after the static geometry is (re)built, so the
+// network is never left showing state-less geometry when topology happens to resolve after the first frame.
+function applyNodeFrameStyles(index, frame) {
+  const states = new Map((frame?.nodes || []).map((n) => [String(n.id), n]))
+  index.forEach((entry, id) => {
+    const f = states.get(id)
+    entry.layer.setTooltipContent(nodeTooltip(entry.node, f))
+    // Outfalls keep their distinct green-rectangle treatment -- they are the network's boundary condition,
+    // not a manhole that can surcharge -- so only their tooltip is refreshed.
+    if (entry.isOutfall) return
+    entry.layer.setStyle(nodeStyleFor(f))
+  })
+}
+
+// Recolour the drainage edges by utilisation.
+// `edge_util` is structurally bounded at 1.0 by the solver (Q = cap_eff * min(1, sqrt(head/drop)), only ever
+// reduced afterwards) -- measured max across every frame of two full scenarios was exactly 1.0000 -- so
+// there is no >1 case to render and no clamp above 1 to apply. Crucially, util == 1.0 means the conduit is
+// flowing at its FULL DESIGN CAPACITY, which is the normal design condition for a storm drain under load,
+// NOT a failure. The ramp therefore runs calm teal (idle) -> saturated indigo (full bore): still an obvious
+// gradient, but it never reads as alarm and never competes with the genuinely red surcharging nodes, which
+// are the actual problem on this map.
+function applyEdgeFrameStyles(index, frame) {
+  if (!frame?.edges?.length) return
+  const util = new Map(frame.edges.map((e) => [e.id, e.util || 0]))
+  index.forEach((pl, id) => {
+    const u = Math.max(0, Math.min(1, util.get(id) ?? 0))
+    pl.setStyle({ color: `hsl(${178 + 54 * u},${45 + 35 * u}%,${62 - 24 * u}%)`, opacity: 0.55 + 0.35 * u })
+  })
+}
+
 // Internal Leaflet layer groups.
 const GROUP_KEYS = ['roads', 'drainageEdges', 'drainageNodes', 'drainageSurcharge', 'hotspots', 'terrain', 'depth', 'streets', 'route']
 const VISIBILITY_FOR = (layers) => ({
@@ -29,6 +130,9 @@ export default function MapView() {
   const svgRendererRef = useRef(null)
   const roadIndexRef = useRef(new Map())
   const edgeIndexRef = useRef(new Map())
+  // id -> { layer, node, isOutfall }. Mirrors edgeIndexRef: markers are created ONCE with the static
+  // topology (creating 1200+ of them is expensive) and then re-styled in place every frame.
+  const nodeIndexRef = useRef(new Map())
   const segIndexRef = useRef(new Map())
   const routeMarkersRef = useRef([])
   const boundsFittedRef = useRef(false)
@@ -37,17 +141,21 @@ export default function MapView() {
   const {
     meta, roads, topology, hotspots, terrain,
     frame, selectedSegId, selectSegment,
-    route, pickPoint,
+    route, pickPoint, alternatives, alternativesStale, selectAlternative,
     layers, terrainOpacity, depthOpacity,
   } = useFloodNet()
 
   const pickPointRef = useRef(pickPoint)
   const selectSegmentRef = useRef(selectSegment)
   const selectedSegIdRef = useRef(selectedSegId)
+  // Declared before the static-geometry effects, so on any commit this is already the current frame by the
+  // time the topology effect below rebuilds the drainage network.
+  const frameRef = useRef(frame)
   useEffect(() => {
     pickPointRef.current = pickPoint
     selectSegmentRef.current = selectSegment
     selectedSegIdRef.current = selectedSegId
+    frameRef.current = frame
   })
 
   // ---------------------------------------------------------------- init (once)
@@ -123,6 +231,7 @@ export default function MapView() {
     edgesG.clearLayers()
     nodesG.clearLayers()
     edgeIndexRef.current.clear()
+    nodeIndexRef.current.clear()
     const caps = (topology.edges || []).map((e) => e.capacity_m3s || 0)
     const cmax = Math.max(1e-6, ...caps)
     for (const e of topology.edges || []) {
@@ -139,10 +248,18 @@ export default function MapView() {
     for (const n of topology.nodes || []) {
       const m = n.is_outfall
         ? L.rectangle([[n.lat - 3e-5, n.lon - 3e-5], [n.lat + 3e-5, n.lon + 3e-5]], { color: '#059669', weight: 2, fillOpacity: 0.6 })
-        : L.circleMarker([n.lat, n.lon], { radius: 2.5, color: '#0284c7', weight: 1, fillOpacity: 0.6 })
-      m.bindTooltip(`<b>${n.is_outfall ? 'Outfall' : 'Node'} ${n.id}</b><br>ground ${(n.ground_m ?? 0).toFixed(2)} m &middot; invert ${(n.invert_m ?? 0).toFixed(2)} m`)
+        : L.circleMarker([n.lat, n.lon], NODE_STYLE_STATIC)
+      m.bindTooltip(nodeTooltip(n, null))
+      // Outfalls keep their distinct green-rectangle treatment and are never re-styled by state (they are
+      // the network's boundary condition, not a manhole that can surcharge); they are still indexed so the
+      // per-frame effect can refresh their tooltip.
+      nodeIndexRef.current.set(String(n.id), { layer: m, node: n, isOutfall: Boolean(n.is_outfall) })
       m.addTo(nodesG)
     }
+    // If topology resolved after the first frame did, style it straight away rather than leaving the whole
+    // network state-less until the user next scrubs the timeline.
+    applyNodeFrameStyles(nodeIndexRef.current, frameRef.current)
+    applyEdgeFrameStyles(edgeIndexRef.current, frameRef.current)
   }, [topology])
 
   // ---------------------------------------------------------------- hotspots (static)
@@ -258,33 +375,31 @@ export default function MapView() {
       }
     }
 
-    // surcharging nodes
+    // Drainage nodes: re-style the persistent markers into the three solver tiers, so every node carries
+    // its hydraulic state instead of only the surcharging minority (previously 1117 of 1233 nodes were
+    // inert blue decoration that never changed across the whole run).
+    applyNodeFrameStyles(nodeIndexRef.current, frame)
+
+    // Pulse halo for spilling nodes only. Kept as a separate SVG-rendered, non-interactive ring because the
+    // node markers themselves live on the canvas renderer (map is preferCanvas) where a CSS animation class
+    // cannot apply; `fill:false` + `interactive:false` means it is purely the pulse, and hover still falls
+    // through to the node marker below, which owns the single unified tooltip.
     const surchG = groupsRef.current.drainageSurcharge
     surchG.clearLayers()
     for (const n of frame.nodes || []) {
-      if (!n.surcharging) continue
-      const m = L.circleMarker([n.lat, n.lon], {
+      if (nodeStateOf(n) !== 'surcharging') continue
+      L.circleMarker([n.lat, n.lon], {
         radius: 6,
         color: '#dc2626',
         weight: 2,
-        fillColor: '#ef4444',
-        fillOpacity: 0.75,
+        fill: false,
         className: 'node-pulse',
+        interactive: false,
         renderer: svgRendererRef.current,
-      })
-      m.bindTooltip(`<b>Surcharging ${n.id}</b><br>cause: ${n.cause || 'capacity exceeded'}<br>${(n.surcharge_m3 ?? 0).toFixed(1)} m&sup3; &middot; HGL ${(n.hgl_m ?? 0).toFixed(2)} m`)
-      m.addTo(surchG)
+      }).addTo(surchG)
     }
 
-    // recolour the drainage edges by utilisation
-    if (frame.edges?.length) {
-      const util = new Map(frame.edges.map((e) => [e.id, e.util || 0]))
-      edgeIndexRef.current.forEach((pl, id) => {
-        const u = Math.max(0, Math.min(1.2, util.get(id) ?? 0))
-        const hue = 200 - 200 * Math.min(1, u)
-        pl.setStyle({ color: `hsl(${hue},85%,${u > 1 ? 40 : 50}%)` })
-      })
-    }
+    applyEdgeFrameStyles(edgeIndexRef.current, frame)
   }, [frame, meta, depthOpacity])
 
   useEffect(() => {
@@ -315,6 +430,10 @@ export default function MapView() {
   }, [selectedSegId])
 
   // ---------------------------------------------------------------- route
+  // Two candidate-route layer patterns share the `route` layer group: the original single-route
+  // baseline(dashed grey)+route(solid green) pair, and -- additive, only drawn once alternatives have been
+  // requested -- N safest/fastest/balanced candidate layers (recommended/selected = strongest line, the rest
+  // lighter/thinner), reusing the exact same visual convention.
   useEffect(() => {
     const g = groupsRef.current.route
     const map = mapRef.current
@@ -333,40 +452,76 @@ export default function MapView() {
       routeMarkersRef.current.push(m)
     }
 
-    if (route.origin) addMarker(route.origin, 'A', '#16a34a')
-    if (route.dest) addMarker(route.dest, 'B', route.result?.reachable === false ? '#dc2626' : '#2563eb')
+    const candidates = alternatives.result?.candidates || []
+    const altUnreachable = alternatives.result?.reachable === false
+    const markerColor = candidates.length > 0 ? (altUnreachable ? '#dc2626' : '#2563eb') : (route.result?.reachable === false ? '#dc2626' : '#2563eb')
 
-    const r = route.result
-    if (r?.baseline_route) {
-      L.geoJSON(r.baseline_route, { style: { color: 'rgba(148, 163, 184, 0.45)', weight: 2.5, dashArray: '4 6', opacity: 0.65 } }).addTo(g)
-    }
+    if (route.origin) addMarker(route.origin, 'A', '#16a34a')
+    if (route.dest) addMarker(route.dest, 'B', markerColor)
 
     const routeKey = route.origin && route.dest ? `${route.origin.join(',')}|${route.dest.join(',')}` : null
 
-    if (r?.route && r.reachable !== false) {
-      const gj = L.geoJSON(r.route, { style: { color: '#22c55e', weight: 6, opacity: 0.98 } }).addTo(g)
-      if (routeKey && routeKey !== fittedRouteKeyRef.current) {
+    if (candidates.length > 0) {
+      // Alternatives mode: render every candidate, selected/recommended on top and strongest.
+      let selectedLayer = null
+      candidates.forEach((c, i) => {
+        if (!c.route) return
+        const isSelected = alternatives.selected === i
+        const color = OBJECTIVE_COLOR[c.objectives?.[0]] || DEFAULT_CANDIDATE_COLOR
+        // Alternatives are deliberately NOT auto-recomputed when the dashboard timestep changes (evaluated
+        // and rejected as too costly). So once `alternativesStale` is true, this geometry was computed for a
+        // different timestep than the street-flood colouring and depth overlay it is drawn over: dash it and
+        // drop its opacity so it can never present itself as current. RoutePlanner carries the wording.
+        const gj = L.geoJSON(c.route, {
+          style: alternativesStale
+            ? { color, weight: isSelected ? 4.5 : 2.5, opacity: isSelected ? 0.55 : 0.28, dashArray: '5 7' }
+            : { color, weight: isSelected ? 6 : 3, opacity: isSelected ? 0.98 : 0.5 },
+        }).addTo(g)
+        gj.on('click', () => selectAlternative(i))
+        if (isSelected) {
+          gj.bringToFront()
+          selectedLayer = gj
+        }
+      })
+      if (selectedLayer && routeKey && routeKey !== fittedRouteKeyRef.current) {
         try {
-          map.fitBounds(gj.getBounds().pad(0.35), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
+          map.fitBounds(selectedLayer.getBounds().pad(0.35), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
           fittedRouteKeyRef.current = routeKey
         } catch {
           /* ignore */
         }
       }
-    } else if (route.origin && route.dest && routeKey && routeKey !== fittedRouteKeyRef.current) {
-      try {
-        const bounds = L.latLngBounds([lonLatToLatLng(route.origin), lonLatToLatLng(route.dest)])
-        map.fitBounds(bounds.pad(0.4), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
-        fittedRouteKeyRef.current = routeKey
-      } catch {
-        /* ignore */
+    } else {
+      const r = route.result
+      if (r?.baseline_route) {
+        L.geoJSON(r.baseline_route, { style: { color: 'rgba(148, 163, 184, 0.45)', weight: 2.5, dashArray: '4 6', opacity: 0.65 } }).addTo(g)
+      }
+
+      if (r?.route && r.reachable !== false) {
+        const gj = L.geoJSON(r.route, { style: { color: '#22c55e', weight: 6, opacity: 0.98 } }).addTo(g)
+        if (routeKey && routeKey !== fittedRouteKeyRef.current) {
+          try {
+            map.fitBounds(gj.getBounds().pad(0.35), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
+            fittedRouteKeyRef.current = routeKey
+          } catch {
+            /* ignore */
+          }
+        }
+      } else if (route.origin && route.dest && routeKey && routeKey !== fittedRouteKeyRef.current) {
+        try {
+          const bounds = L.latLngBounds([lonLatToLatLng(route.origin), lonLatToLatLng(route.dest)])
+          map.fitBounds(bounds.pad(0.4), { maxZoom: 16, minZoom: 13, animate: true, duration: 0.5 })
+          fittedRouteKeyRef.current = routeKey
+        } catch {
+          /* ignore */
+        }
       }
     }
 
     if (!route.origin && !route.dest) {
       fittedRouteKeyRef.current = null
     }
-  }, [route])
+  }, [route, alternatives, alternativesStale, selectAlternative])
 
   const legendRows = DEFAULT_BANDS_CM.map(([limit, label], i) => {
     const lo = i === 0 ? 0 : DEFAULT_BANDS_CM[i - 1][0]

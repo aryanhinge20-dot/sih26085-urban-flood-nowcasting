@@ -38,7 +38,17 @@ export default function LayerControl() {
 
       <div className={styles.groupSep}>Technical</div>
       <div className={styles.group}>
-        {TECHNICAL.map((it) => <Row item={it} key={it.key} />)}
+        {TECHNICAL.map((it) => (
+          <div key={it.key}>
+            <Row item={it} />
+            {it.key === 'drainage' && (
+              <div className={styles.drainageLegend}>
+                Nodes: blue = normal · amber = at capacity · red = surcharging.
+                Conduits: colour = flow ÷ design capacity (1.0 = full design flow).
+              </div>
+            )}
+          </div>
+        ))}
       </div>
 
       {/* Opacity sliders — restoring parity with the legacy frontend/ dashboard */}

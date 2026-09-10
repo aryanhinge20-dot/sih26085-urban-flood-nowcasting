@@ -53,9 +53,10 @@ export default function Header({ onToggleHome, isHomeActive }) {
           className={styles.brandBtn}
           onClick={onToggleHome}
           title="Return to System Overview"
+          aria-label="FloodNet — return to system overview"
           type="button"
         >
-          <span className={`${styles.brandDot} ${simulating ? styles.brandDotPulse : ''}`} />
+          <span className={`${styles.brandDot} ${simulating ? styles.brandDotPulse : ''}`} aria-hidden="true" />
           <div className={styles.brandMeta}>
             <span className={styles.brandTitle}>FloodNet</span>
             <span className={styles.brandSub}>Urban Flood Command Centre</span>
@@ -68,6 +69,7 @@ export default function Header({ onToggleHome, isHomeActive }) {
             onClick={onToggleHome}
             type="button"
             title="Switch between Overview and Control Room"
+            aria-label={isHomeActive ? 'Switch to map control room' : 'Switch to system overview'}
           >
             {isHomeActive ? 'Map' : 'Overview'}
           </button>
@@ -97,19 +99,28 @@ export default function Header({ onToggleHome, isHomeActive }) {
           </span>
         </div>
 
-        <div className={styles.metaDivider} />
+        <div className={styles.metaDivider} aria-hidden="true" />
 
         <div className={styles.metaBlock}>
           <span className={styles.metaLabel}>Data Source</span>
           <span className={styles.metaValue}>{dataSourceText}</span>
         </div>
 
-        <div className={styles.metaDivider} />
+        <div className={styles.metaDivider} aria-hidden="true" />
 
         <div className={styles.metaBlock}>
-          <span className={styles.metaLabel}>Simulation Status</span>
-          <div className={styles.statusRow}>
-            <span className={`${styles.statusDot} ${dotClass}`} />
+          <span className={styles.metaLabel} id="sim-status-label">Simulation Status</span>
+          {/* Polite live region: run status transitions (Computing -> Ready / Failed) happen without
+              any further user action and are infrequent, so announcing them does not spam. The dot is
+              decorative -- the same state is always carried by statusText, so colour is never the
+              only channel. */}
+          <div
+            className={styles.statusRow}
+            role="status"
+            aria-atomic="true"
+            aria-labelledby="sim-status-label"
+          >
+            <span className={`${styles.statusDot} ${dotClass}`} aria-hidden="true" />
             <span className={styles.metaValue}>{statusText}</span>
           </div>
         </div>

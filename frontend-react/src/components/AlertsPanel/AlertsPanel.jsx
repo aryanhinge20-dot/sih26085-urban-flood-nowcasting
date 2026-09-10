@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import {
   ALERT_LABEL, ADVISORY_LABEL, CATEGORY_COLOR,
@@ -7,8 +7,89 @@ import {
 import { fmt } from '../../lib/format.js'
 import styles from './AlertsPanel.module.css'
 
+// GET /api/simulation/{run_id}/alert (backend/floodnet/api/main.py::alert_draft). Fetched here rather
+// than through src/api/client.js purely because of the file-ownership split in this parallel work
+// session -- client.js is owned by another agent right now. Shape asserted by
+// backend/tests/test_alerts_cap.py::test_alert_endpoint_contract.
+async function fetchCapDraft(runId) {
+  const res = await fetch(`/api/simulation/${encodeURIComponent(runId)}/alert`)
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    data = null
+  }
+  if (!res.ok) {
+    const detail = (data && (data.detail || data.error)) || res.statusText
+    throw new Error(typeof detail === 'string' ? detail : 'CAP draft request failed')
+  }
+  return data
+}
+
+function capField(draft, name) {
+  return draft?.cap?.info?.[0]?.[name]
+}
+
 export default function AlertsPanel() {
   const { run, series, route, currentT, roads, selectSegment, currentScenario } = useFloodNet()
+
+  // --- CAP 1.2 draft export ------------------------------------------------------------------
+  // This is a DRAFT for an authorised officer, never an issued warning. FloodNet is not a designated
+  // alerting authority (no NDMA SACHET credential, no submission path, no SMS/cell-broadcast channel
+  // and no subscriber data), so the only honest product is a standards-conformant file that an
+  // authority can review, edit and issue under its own authority. The backend emits CAP status="Draft",
+  // which the OASIS CAP 1.2 spec itself defines as "A preliminary template or draft, not actionable in
+  // its current form".
+  const [capDraft, setCapDraft] = useState(null)
+  const [capState, setCapState] = useState('idle') // idle | loading | ready | error
+  const [capError, setCapError] = useState(null)
+  const [showXml, setShowXml] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const runId = run?.run_id ?? null
+
+  const generateCap = useCallback(async () => {
+    if (!runId) return
+    setCapState('loading')
+    setCapError(null)
+    setCopied(false)
+    try {
+      const data = await fetchCapDraft(runId)
+      setCapDraft(data)
+      setCapState('ready')
+    } catch (e) {
+      setCapDraft(null)
+      setCapError(e.message || String(e))
+      setCapState('error')
+    }
+  }, [runId])
+
+  const copyXml = useCallback(async () => {
+    if (!capDraft?.cap_xml) return
+    try {
+      await navigator.clipboard.writeText(capDraft.cap_xml)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }, [capDraft])
+
+  const downloadXml = useCallback(() => {
+    if (!capDraft?.cap_xml) return
+    const blob = new Blob([capDraft.cap_xml], { type: 'application/cap+xml' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `floodnet-cap-DRAFT-NOT-ISSUED-${capDraft.run_id}.xml`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, [capDraft])
+
+  // A draft belongs to the run it was generated from; if the user runs a new forecast, drop it rather
+  // than leaving stale numbers on screen next to a different run.
+  const staleDraft = capDraft != null && capDraft.run_id !== runId
 
   const segNameById = useMemo(() => {
     const m = new Map()
@@ -129,6 +210,140 @@ export default function AlertsPanel() {
               </li>
             ))}
           </ul>
+        </>
+      )}
+
+      {run && (
+        <>
+          <div className={`panel-heading ${styles.capHeading}`}>CAP alert draft</div>
+
+          <div className={styles.capNotIssued}>
+            <div className={styles.capNotIssuedTitle}>⛔ NOT AN ISSUED WARNING</div>
+            FloodNet is <b>not a designated alerting authority</b>. It cannot and does not send alerts to
+            citizens: it has no NDMA SACHET credential or submission path, no SMS or cell-broadcast
+            channel, and no phone numbers or subscriber data. What this button produces is a
+            <b> machine-generated draft</b> in the OASIS CAP 1.2 format — carrying{' '}
+            <code>status=Draft</code>, which that specification defines as “a preliminary template or
+            draft, not actionable in its current form” — for an authorised officer to review, edit and, if
+            they judge it warranted, issue through their own agency’s system under their own authority.
+          </div>
+
+          <button
+            type="button"
+            className={styles.capButton}
+            onClick={generateCap}
+            disabled={capState === 'loading' || !runId}
+          >
+            {capState === 'loading'
+              ? 'Generating CAP 1.2 draft…'
+              : capDraft && !staleDraft
+                ? 'Regenerate CAP alert draft'
+                : 'Generate CAP alert draft'}
+          </button>
+
+          {capState === 'error' && (
+            <div className={styles.capError}>Could not generate a draft: {capError}</div>
+          )}
+
+          {capDraft && staleDraft && (
+            <div className={styles.capStale}>
+              The draft on screen belongs to an earlier run ({capDraft.run_id}). Generate a new one for the
+              current forecast.
+            </div>
+          )}
+
+          {capDraft && !staleDraft && (
+            <div className={styles.capDraft}>
+              <div className={styles.capWatermark}>
+                DRAFT · NOT ISSUED · {capDraft.message_class}
+              </div>
+
+              <div className={styles.capHeadline}>{capField(capDraft, 'headline')}</div>
+
+              <div className={styles.capGrid}>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>CAP status</span>
+                  <span className={styles.capValue}>{capDraft.cap?.status}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Scope</span>
+                  <span className={styles.capValue}>{capDraft.cap?.scope}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Severity</span>
+                  <span className={styles.capValue}>{capField(capDraft, 'severity')}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Urgency</span>
+                  <span className={styles.capValue}>{capField(capDraft, 'urgency')}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Certainty</span>
+                  <span className={styles.capValue}>{capField(capDraft, 'certainty')}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Onset</span>
+                  <span className={styles.capValue}>{capField(capDraft, 'onset') || 'none forecast'}</span>
+                </div>
+              </div>
+
+              <div className={styles.capSubLabel}>Derived from this run</div>
+              <div className={styles.capGrid}>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Peak depth</span>
+                  <span className={styles.capValue}>
+                    {fmt(capDraft.model_basis?.peak_depth_cm, 1)} cm @ T+
+                    {fmt(capDraft.model_basis?.peak_t_min, 0)}m
+                  </span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Affected segments</span>
+                  <span className={styles.capValue}>{capDraft.model_basis?.affected_segment_count}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Surcharging nodes</span>
+                  <span className={styles.capValue}>{capDraft.model_basis?.surcharging_nodes_at_peak}</span>
+                </div>
+                <div className={styles.capCell}>
+                  <span className={styles.capLabel}>Rainfall provenance</span>
+                  <span className={styles.capValue}>
+                    {capDraft.model_basis?.rainfall_provenance?.tag || 'UNKNOWN'}
+                  </span>
+                </div>
+              </div>
+
+              <div className={styles.capSubLabel}>Affected area (CAP areaDesc)</div>
+              <div className={styles.capText}>{capDraft.cap?.info?.[0]?.area?.[0]?.areaDesc}</div>
+
+              <div className={styles.capSubLabel}>Description</div>
+              <div className={styles.capText}>{capField(capDraft, 'description')}</div>
+
+              <div className={styles.capSubLabel}>Instruction to the reviewing officer</div>
+              <div className={styles.capText}>{capField(capDraft, 'instruction')}</div>
+
+              <div className={styles.capActions}>
+                <button type="button" className={styles.capMiniButton} onClick={() => setShowXml((v) => !v)}>
+                  {showXml ? 'Hide CAP XML' : 'Show CAP XML'}
+                </button>
+                <button type="button" className={styles.capMiniButton} onClick={copyXml}>
+                  {copied ? 'Copied ✓' : 'Copy XML'}
+                </button>
+                <button type="button" className={styles.capMiniButton} onClick={downloadXml}>
+                  Download .xml
+                </button>
+              </div>
+
+              {showXml && <pre className={styles.capXml}>{capDraft.cap_xml}</pre>}
+
+              <div className={styles.capFooter}>
+                CAP {capDraft.cap_version} ({capDraft.cap_namespace}). Severity is derived from FloodNet’s
+                own working depth bands, which the source labels “WORKING THRESHOLDS, NOT CITED GUIDANCE” —
+                it is a model classification, <b>not</b> an official flood-severity classification from
+                NDMA, IMD, CWC or MCGM. No India-specific CAP profile was found published, so conformance is
+                claimed to CAP 1.2 only. This draft has not been sent to anyone.
+              </div>
+            </div>
+          )}
         </>
       )}
 

@@ -12,12 +12,18 @@ export const DEFAULT_BANDS_CM = [
 
 export const SEVERITY_ORDER = ['clear', 'minor', 'moderate', 'severe', 'critical']
 
+// Kept in lockstep with the --sev-* custom properties in index.css. These two palettes had drifted: this
+// object still held the saturated values from the pre-light-theme design (#ffd23f / #ff8c1a / #ff3b3b),
+// which are used BOTH as map-marker fills AND as text/tint on the near-white panel surfaces -- bright
+// yellow text at ~9.5px on #FEFCF7 does not reach a 4.5:1 contrast ratio. Values below are the darkened
+// light-theme ones, with `severe` given its own value: index.css had it duplicating `moderate`, which made
+// two distinct severity bands render identically on the map and in the street list.
 export const SEVERITY_COLOR = {
-  clear: '#5b6472',
-  minor: '#ffd23f',
-  moderate: '#ff8c1a',
-  severe: '#ff3b3b',
-  critical: '#c81e5c',
+  clear: '#6B7280',
+  minor: '#C99A1E',
+  moderate: '#D9731F',
+  severe: '#C2410C',
+  critical: '#C4273D',
 }
 
 export const SEVERITY_LABEL = {

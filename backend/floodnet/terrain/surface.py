@@ -75,6 +75,10 @@ class StorageCellSurface:
             self.open_boundary = outward_open_boundary(terrain)
         else:
             self.open_boundary = np.asarray(open_boundary, dtype=bool)
+        # cached once: self.open_boundary is fixed for the life of the instance (set only here, never
+        # reassigned), so `.any()` need not be recomputed on every _substep() call (perf only, no physics
+        # change).
+        self._has_open_boundary = bool(self.open_boundary.any())
         self._boundary_out = 0.0
         # outward friction slope at the boundary = local terrain slope, floored so the outfall stays finite
         self._bnd_sqrt_s = np.zeros(self.z.shape)
@@ -93,6 +97,31 @@ class StorageCellSurface:
         self.open_y = self.open[:-1, :] & self.open[1:, :]
         self.inv_n = 1.0 / self.n
         self.sqrt_inv_dx = 1.0 / np.sqrt(self.res)
+        # Pre-allocated scratch buffers for _substep() (perf only): _substep was allocating ~15-20 fresh
+        # full-grid/face-shaped arrays per call across 3,905 calls (67.6% of total runtime self-time,
+        # profiled on the heavy/70%-blockage/180-min pilot scenario). _substep now writes into these via
+        # numpy's `out=` kwarg instead of allocating new arrays; the sequence of operations, the operands
+        # and the floating-point operation order are unchanged from before -- only where results are
+        # stored. See docs/PERFORMANCE_OPTIMIZATION.md section 6-7.
+        grid_shape = self.z.shape
+        x_face_shape = self.zmax_x.shape   # (ny, nx-1)
+        y_face_shape = self.zmax_y.shape   # (ny-1, nx)
+        self._H = np.empty(grid_shape, dtype=np.float64)
+        self._out = np.empty(grid_shape, dtype=np.float64)
+        self._stored = np.empty(grid_shape, dtype=np.float64)
+        self._scale = np.empty(grid_shape, dtype=np.float64)
+        self._hb = np.empty(grid_shape, dtype=np.float64)
+        self._q = np.empty(grid_shape, dtype=np.float64)
+        self._dh = np.empty(grid_shape, dtype=np.float64)
+        self._inf = np.empty(grid_shape, dtype=np.float64)
+        self._dHx = np.empty(x_face_shape, dtype=np.float64)
+        self._hx = np.empty(x_face_shape, dtype=np.float64)
+        self._vx = np.empty(x_face_shape, dtype=np.float64)
+        self._Vx = np.empty(x_face_shape, dtype=np.float64)
+        self._dHy = np.empty(y_face_shape, dtype=np.float64)
+        self._hy = np.empty(y_face_shape, dtype=np.float64)
+        self._vy = np.empty(y_face_shape, dtype=np.float64)
+        self._Vy = np.empty(y_face_shape, dtype=np.float64)
         self.last_dt_used = 0.0
         self.substeps = 0
 
@@ -125,34 +154,40 @@ class StorageCellSurface:
 
     # ------------------------------------------------------------------ routing
     def _substep(self, remaining: float) -> float:
-        """One explicit sub-step of at most `remaining` seconds; returns the dt actually used."""
+        """One explicit sub-step of at most `remaining` seconds; returns the dt actually used.
+
+        Perf note: all full-grid/face-shaped intermediates are written into pre-allocated scratch
+        buffers (self._H, self._dHx, ...; see __init__) via numpy's `out=` kwarg rather than being
+        freshly allocated every call. This is allocation-strategy only -- the sequence of operations,
+        the operands and the floating-point operation order are byte-for-byte the same as before.
+        """
         h = self.depth
         A = self.area
-        H = self.z + h
+        H = self._H; np.add(self.z, h, out=H)
         # x faces (between (j,i) and (j,i+1)); y faces (between (j,i) and (j+1,i))
-        dHx = H[:, :-1] - H[:, 1:]
-        dHy = H[:-1, :] - H[1:, :]
-        hx = np.maximum(H[:, :-1], H[:, 1:]); hx -= self.zmax_x
-        hy = np.maximum(H[:-1, :], H[1:, :]); hy -= self.zmax_y
+        dHx = self._dHx; np.subtract(H[:, :-1], H[:, 1:], out=dHx)
+        dHy = self._dHy; np.subtract(H[:-1, :], H[1:, :], out=dHy)
+        hx = self._hx; np.maximum(H[:, :-1], H[:, 1:], out=hx); hx -= self.zmax_x
+        hy = self._hy; np.maximum(H[:-1, :], H[1:, :], out=hy); hy -= self.zmax_y
         hx[(hx < H_MIN) | ~self.open_x] = 0.0
         hy[(hy < H_MIN) | ~self.open_y] = 0.0
         # velocity = (1/n) h_eff^(2/3) sqrt(|dH|/dx); unit flux q = v * h_eff (m2/s)
-        vx = np.cbrt(hx * hx); vx *= np.sqrt(np.abs(dHx)); vx *= self.inv_n * self.sqrt_inv_dx
-        vy = np.cbrt(hy * hy); vy *= np.sqrt(np.abs(dHy)); vy *= self.inv_n * self.sqrt_inv_dx
+        vx = self._vx; np.cbrt(hx * hx, out=vx); vx *= np.sqrt(np.abs(dHx)); vx *= self.inv_n * self.sqrt_inv_dx
+        vy = self._vy; np.cbrt(hy * hy, out=vy); vy *= np.sqrt(np.abs(dHy)); vy *= self.inv_n * self.sqrt_inv_dx
         vmax = max(float(vx.max()), float(vy.max()))
         dt = remaining if vmax <= 0.0 else min(remaining, self.cfl * self.res / vmax)
         dt = max(dt, min(self.dt_min, remaining))
         # signed face volumes (m3) over dt, capped at HEAD_CAP * head-difference volume (no level inversion)
-        Vx = vx * hx; Vx *= self.res * dt; np.minimum(Vx, HEAD_CAP * np.abs(dHx) * A, out=Vx); np.copysign(Vx, dHx, out=Vx)
-        Vy = vy * hy; Vy *= self.res * dt; np.minimum(Vy, HEAD_CAP * np.abs(dHy) * A, out=Vy); np.copysign(Vy, dHy, out=Vy)
+        Vx = self._Vx; np.multiply(vx, hx, out=Vx); Vx *= self.res * dt; np.minimum(Vx, HEAD_CAP * np.abs(dHx) * A, out=Vx); np.copysign(Vx, dHx, out=Vx)
+        Vy = self._Vy; np.multiply(vy, hy, out=Vy); Vy *= self.res * dt; np.minimum(Vy, HEAD_CAP * np.abs(dHy) * A, out=Vy); np.copysign(Vy, dHy, out=Vy)
         # total outflow per cell must not exceed stored volume -> scale faces by upstream cell factor
-        out = np.zeros_like(h)
+        out = self._out; out.fill(0.0)
         out[:, :-1] += np.maximum(Vx, 0.0); out[:, 1:] -= np.minimum(Vx, 0.0)
         out[:-1, :] += np.maximum(Vy, 0.0); out[1:, :] -= np.minimum(Vy, 0.0)
-        stored = h * A
+        stored = self._stored; np.multiply(h, A, out=stored)
         over = out > stored
         if over.any():
-            scale = np.ones_like(h)
+            scale = self._scale; scale.fill(1.0)
             scale[over] = stored[over] / out[over]
             Vx *= np.where(Vx > 0, scale[:, :-1], scale[:, 1:])
             Vy *= np.where(Vy > 0, scale[:-1, :], scale[1:, :])
@@ -160,15 +195,15 @@ class StorageCellSurface:
         h[:, :-1] -= Vx; h[:, 1:] += Vx
         h[:-1, :] -= Vy; h[1:, :] += Vy
         np.maximum(h, 0.0, out=h)
-        if self.open_boundary.any():
+        if self._has_open_boundary:
             # free outfall at the domain edge: q = (1/n) h^(5/3) sqrt(S) per unit width (m2/s)
-            hb = np.where(self.open_boundary, h, 0.0)
-            q = self.inv_n * hb * np.cbrt(hb * hb) * self._bnd_sqrt_s      # h^(5/3)
-            dh = np.minimum(hb, q * dt / self.res)
+            hb = self._hb; hb.fill(0.0); hb[self.open_boundary] = h[self.open_boundary]
+            q = self._q; np.multiply(self.inv_n * hb * np.cbrt(hb * hb), self._bnd_sqrt_s, out=q)   # h^(5/3)
+            dh = self._dh; np.minimum(hb, q * dt / self.res, out=dh)
             h -= dh
             self._boundary_out += float(dh.sum()) * A
         if self.infil_rate > 0.0:
-            inf = np.minimum(h, self._infil_depth_rate * dt)
+            inf = self._inf; np.minimum(h, self._infil_depth_rate * dt, out=inf)
             h -= inf
             self._infiltrated += float(inf.sum()) * A
         return dt

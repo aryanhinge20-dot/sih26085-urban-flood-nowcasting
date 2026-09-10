@@ -16,9 +16,19 @@ Caveats that the report must carry (see research/mumbai/FLOOD_GROUND_TRUTH.md):
   * The Chitale (2006) report names roads/areas, not coordinates; that match is qualitative only.
   * If the model floods most of the pilot at the scoring depth, agreement with the spots is uninformative — the
     base rate is therefore reported alongside every score.
+  * A raw DETECTED count is NOT evidence of spatial skill: the footprints range from 7 to 2,468 cells, and the
+    "max depth anywhere in the footprint" rule makes a large footprint near-certain to score DETECTED at any
+    non-trivial base rate. `permutation_test()` below is the control for that; read it before quoting counts.
+
+BOUNDARY CONDITION (fixed 2026-09-10). `run_pilot_scenario` previously constructed `StorageCellSurface(terrain)`
+— i.e. the CLOSED boundary — while the shipped API (`floodnet.api.state:203`) uses `open_boundary=True`, despite
+the docstring above claiming identical wiring. The closed boundary ponds water against the clip line and biases
+this check toward over-detection. The default is now `open_boundary=True`, matching the API. Pass
+`--closed-boundary` (or `open_boundary=False`) to reproduce the pre-fix runs.
 
 CLI:
     python -m floodnet.validation.flooding_spots --scenarios heavy july2005 --horizon-min 180
+    python -m floodnet.validation.flooding_spots --scenarios moderate heavy july2005 --permutations 2000
 """
 from __future__ import annotations
 
@@ -41,6 +51,10 @@ DETECT_CM = 15.0
 MARGINAL_CM = 5.0
 ONSET_THRESHOLDS_CM = (5.0, 15.0, 30.0)
 DEFAULT_RADIUS_M = 50.0
+
+# Spatial permutation test (see permutation_test). Fixed so the published p-values are reproducible.
+PERM_N = 2000
+PERM_SEED = 20260910
 
 # Named locations in the Chitale Committee report (2006) that fall in / next to the pilot bbox.
 # Substrings are matched case-insensitively against OSM road-segment names. Precision: named location only.
@@ -234,6 +248,156 @@ def evaluate_spots(pilot: dict, res: SimulationResult, spots: Optional[list[dict
             "spots": rows}
 
 
+# ----------------------------------------------------------------------------- spatial permutation test
+def _kernel_of(mask: np.ndarray) -> np.ndarray:
+    """Crop a full-grid footprint mask to its bounding box. Shape and cell count are preserved exactly."""
+    js, iss = np.nonzero(mask)
+    return np.ascontiguousarray(mask[js.min():js.max() + 1, iss.min():iss.max() + 1])
+
+
+def _placement_counts(field: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """[ny-h+1, nx-w+1] int: number of True `field` cells covered by `kernel` at every top-left placement.
+
+    Cross-correlation via FFT (scipy). Deterministic; rounded back to exact integers.
+    """
+    from scipy.signal import fftconvolve
+    h, w = kernel.shape
+    if h > field.shape[0] or w > field.shape[1]:
+        return np.zeros((0, 0), dtype=np.int64)
+    c = fftconvolve(field.astype(np.float64), kernel[::-1, ::-1].astype(np.float64), mode="valid")
+    return np.rint(c).astype(np.int64)
+
+
+def permutation_test(pilot: dict, res: SimulationResult, spots: Optional[list[dict]] = None,
+                     n_perm: int = PERM_N, seed: int = PERM_SEED, radius_m: float = DEFAULT_RADIUS_M,
+                     detect_cm: float = DETECT_CM) -> dict:
+    """Null: "the modelled flooded footprint overlaps the known chronic-flooding spots no more than
+    randomly-placed footprints of identical shape and cell count would."
+
+    Each *active* spot footprint is cropped to its bounding box and translated to a uniformly-random valid
+    top-left position in the pilot grid. Shape, orientation and exact cell count are preserved (no rotation, no
+    resampling) — essential, because the real footprints span 7 to 2,468 cells and the scoring rule ("max depth
+    ANYWHERE in the footprint >= 15 cm") makes detection a near-deterministic function of footprint size.
+
+    Validity of a relocation:
+      * the whole translated footprint must lie inside the grid; and
+      * it must cover at least as many NON-BUILDING (flowable) cells as the real footprint does.
+    The second constraint matters. Buildings are no-flow cells that are dry by construction (~21 % of the grid),
+    so an unconstrained relocation can land on a building block, be unable to register any depth, and make the
+    null artificially easy to beat — i.e. it would flatter the model. Requiring at least the observed wettable
+    area makes every null placement at least as capable of scoring a detection as the real footprint is.
+    Depths are read on non-building cells only, for the observed and the null placements alike.
+
+    Relocations are independent across spots (they may overlap each other); no spot is required to avoid the
+    real spot locations. Reported statistics, one-sided against the null "random does at least as well":
+
+      detected     number of active spots scoring DETECTED (the headline count).
+      sum_depth_cm sum over active spots of the max depth in the footprint (cm) — a continuous statistic with
+                   far more resolution than a count over 5 spots, which is nearly powerless on its own.
+
+    p = (1 + #{null >= observed}) / (n_perm + 1)  — the standard unbiased Monte-Carlo p-value; it can never be
+    exactly 0. A LARGE p means the model did NOT beat random placement.
+    """
+    terrain = pilot["terrain"]; grid = terrain.grid
+    all_spots = pilot.get("hotspots", []) if spots is None else spots
+    active = [s for s in all_spots if bool(s.get("active", True))]
+    env = depth_envelope(res)
+    flowable = ~np.asarray(terrain.building, dtype=bool)
+    env = np.where(flowable, env, 0.0)          # buildings are no-flow; make that explicit for both arms
+    thr = detect_cm / 100.0
+    rng = np.random.default_rng(seed)
+
+    null_det = np.zeros((n_perm, len(active)), dtype=bool)
+    null_dep = np.zeros((n_perm, len(active)), dtype=np.float64)
+    obs_det = np.zeros(len(active), dtype=bool)
+    obs_dep = np.zeros(len(active), dtype=np.float64)
+    rows = []
+    for si, s in enumerate(active):
+        mask, kind = footprint_mask(grid, s, radius_m)
+        kernel = _kernel_of(mask)
+        h, w = kernel.shape
+        n_cells = int(kernel.sum())
+        n_flow_obs = int((mask & flowable).sum())
+        obs_dep[si] = float(env[mask].max()) * 100.0
+        obs_det[si] = obs_dep[si] >= detect_cm
+
+        flow_cnt = _placement_counts(flowable, kernel)
+        constraint = "flowable_cells >= observed"
+        ok = flow_cnt >= max(n_flow_obs, 1)
+        if not ok.any():                        # nothing can match the observed wettable area -> relax, and say so
+            ok = flow_cnt >= 1
+            constraint = "RELAXED: flowable_cells >= 1 (no placement matched the observed wettable area)"
+        idx = np.flatnonzero(ok.ravel())
+        if idx.size == 0:
+            raise ValueError(f"spot {s.get('name')!r}: no valid relocation in a {grid.ny}x{grid.nx} grid "
+                             f"for a {h}x{w} footprint")
+        pick = rng.choice(idx, size=n_perm, replace=True)
+        j0 = pick // ok.shape[1]
+        i0 = pick % ok.shape[1]
+        for p in range(n_perm):
+            sub = env[j0[p]:j0[p] + h, i0[p]:i0[p] + w][kernel]
+            d = float(sub.max()) * 100.0
+            null_dep[p, si] = d
+            null_det[p, si] = d >= detect_cm
+
+        # exact per-spot detection probability over ALL valid placements (free, and a check on the sampling)
+        wet_cnt = _placement_counts((env >= thr) & flowable, kernel)
+        exact_p = float(np.mean((wet_cnt.ravel()[idx] >= 1)))
+        rows.append({"name": (s.get("name") or "").strip(), "footprint": kind, "footprint_cells": n_cells,
+                     "footprint_bbox": [int(h), int(w)], "flowable_cells": n_flow_obs,
+                     "n_valid_placements": int(idx.size), "constraint": constraint,
+                     "observed_max_depth_cm": obs_dep[si], "observed_detected": bool(obs_det[si]),
+                     "null_detect_prob_exact": exact_p,
+                     "null_detect_prob_sampled": float(null_det[:, si].mean())})
+
+    det_obs = int(obs_det.sum()); det_null = null_det.sum(axis=1)
+    dep_obs = float(obs_dep.sum()); dep_null = null_dep.sum(axis=1)
+    p_det = float((1 + int((det_null >= det_obs).sum())) / (n_perm + 1))
+    p_dep = float((1 + int((dep_null >= dep_obs).sum())) / (n_perm + 1))
+    return {
+        "scenario": res.scenario.id, "n_perm": int(n_perm), "seed": int(seed), "detect_cm": float(detect_cm),
+        "n_active_spots": len(active),
+        "null_model": "translate each active footprint to a uniformly random valid position; shape and cell "
+                      "count preserved exactly; placements independent across spots",
+        "validity_rule": "translated footprint fully inside grid AND covering >= as many non-building cells "
+                         "as the real footprint",
+        "p_value_definition": "(1 + #{null >= observed}) / (n_perm + 1), one-sided; large p = no skill",
+        "detected": {"observed": det_obs, "null_mean": float(det_null.mean()), "null_sd": float(det_null.std(ddof=1)),
+                     "null_median": float(np.median(det_null)), "p_value": p_det,
+                     "null_ge_observed": int((det_null >= det_obs).sum())},
+        "sum_max_depth_cm": {"observed": dep_obs, "null_mean": float(dep_null.mean()),
+                             "null_sd": float(dep_null.std(ddof=1)), "null_median": float(np.median(dep_null)),
+                             "p_value": p_dep, "null_ge_observed": int((dep_null >= dep_obs).sum())},
+        "spots": rows,
+    }
+
+
+def render_permutation_markdown(runs: list[dict]) -> str:
+    L = ["## Spatial permutation test (control for footprint size)", "",
+         f"Null: each active MCGM footprint is translated to a uniformly-random valid position in the pilot, "
+         f"preserving shape and exact cell count; {runs[0]['n_perm']} permutations, seed {runs[0]['seed']}; "
+         "p = (1 + #{null >= observed}) / (n+1), one-sided. **A large p means the model did not beat chance.**", "",
+         "| Scenario | Observed DETECTED | Null mean | Null SD | p (count) | Observed Σ max depth (cm) | Null mean | p (depth) |",
+         "|---|---|---|---|---|---|---|---|"]
+    for r in runs:
+        d = r["detected"]; s = r["sum_max_depth_cm"]
+        L.append(f"| `{r['scenario']}` | {d['observed']} / {r['n_active_spots']} | {d['null_mean']:.2f} | "
+                 f"{d['null_sd']:.2f} | **{d['p_value']:.4f}** | {s['observed']:.1f} | {s['null_mean']:.1f} | "
+                 f"**{s['p_value']:.4f}** |")
+    L += ["", "Per-spot exact detection probability under the null (over *all* valid placements, not sampled):", "",
+          "| Scenario | Spot | Cells | Observed max cm | Observed DETECTED | Null P(detect) | Valid placements |",
+          "|---|---|---|---|---|---|---|"]
+    for r in runs:
+        for sp in r["spots"]:
+            L.append(f"| `{r['scenario']}` | {sp['name']} | {sp['footprint_cells']} | "
+                     f"{sp['observed_max_depth_cm']:.1f} | {'yes' if sp['observed_detected'] else 'no'} | "
+                     f"{sp['null_detect_prob_exact']:.3f} | {sp['n_valid_placements']} |")
+    L += ["", "**Power warning.** Only 5 active spots fall inside the pilot, so the count statistic can take six "
+              "values and cannot reach conventional significance however well the model performs. The Σ-depth "
+              "statistic is reported because it is continuous and therefore has real resolution.", ""]
+    return "\n".join(L)
+
+
 # ----------------------------------------------------------------------------- Chitale named roads
 def chitale_match(pilot: dict, res: SimulationResult, terms=CHITALE_TERMS) -> list[dict]:
     roads = pilot.get("roads")
@@ -261,7 +425,10 @@ def chitale_match(pilot: dict, res: SimulationResult, terms=CHITALE_TERMS) -> li
 
 
 # ----------------------------------------------------------------------------- run wiring (copied from api.state)
-def run_pilot_scenario(pilot: dict, scenario_id: str, horizon_min: int = 180, blockage: Optional[dict] = None):
+def run_pilot_scenario(pilot: dict, scenario_id: str, horizon_min: int = 180, blockage: Optional[dict] = None,
+                       open_boundary: bool = True):
+    """Same wiring as `floodnet.api.state` — including `open_boundary=True`, which this function did NOT pass
+    before 2026-09-10 (see the module docstring). Pass `open_boundary=False` to reproduce the pre-fix runs."""
     from ..simulation.engine import run_simulation
     from ..terrain.runoff import runoff_fn
     from ..terrain.surface import StorageCellSurface
@@ -271,7 +438,8 @@ def run_pilot_scenario(pilot: dict, scenario_id: str, horizon_min: int = 180, bl
     scen = sc[scenario_id] if isinstance(sc, dict) else next(s for s in sc if s.id == scenario_id)
     terrain = pilot["terrain"]; net = pilot["net"]
     street_fn = make_street_fn(pilot["roads"], terrain.grid) if pilot.get("roads") is not None else None
-    return run_simulation(terrain, net, scen, StorageCellSurface(terrain), GraphDrainage(net), runoff_fn,
+    surface = StorageCellSurface(terrain, open_boundary=bool(open_boundary))
+    return run_simulation(terrain, net, scen, surface, GraphDrainage(net), runoff_fn,
                           street_fn=street_fn, blockage=blockage or {"mode": "none"},
                           horizon_s=int(horizon_min) * 60, frame_dt_s=config.FRAME_DT_S)
 

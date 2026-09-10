@@ -347,13 +347,35 @@ def _run_ecmwf_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
     return res
 
 
+def _run_radar_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
+    """scenario_id='imd_radar': the IMD Doppler Weather Radar boundary. In this build the provider ALWAYS
+    raises `ProviderUnavailable` on the first line below (an "ACCESS PENDING -- ..." reason), which
+    api/main.py turns into HTTP 503 exactly as it does for the live/ECMWF paths -- so a radar request fails
+    honestly and is never quietly served by a scenario, the replay, the IMD observation or the ECMWF
+    forecast wearing a radar label. See IMDRadarNowcastProvider's docstring, docs/LIVE_RAINFALL_AUDIT.md
+    sections 8b/8c and decision D-14 for why radar is disabled.
+
+    The physics call below is deliberately left in place (and deliberately unreachable today): it is the
+    identical shape used by _run_live_scenario/_run_ecmwf_scenario, so if a real, licensed, documented radar
+    endpoint ever exists, the only thing that has to change is the provider -- not this dispatch path.
+    """
+    from ..rainfall.provider import list_providers, RADAR_ID
+    scen, meta = list_providers()[RADAR_ID].get(RADAR_ID)   # raises ProviderUnavailable in this build
+    res = _run_physics(scen, blockage, horizon_min, get_pilot())
+    res.provenance = dict(res.provenance)
+    res.provenance["rainfall_source"] = meta.to_dict()
+    return res
+
+
 def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
     """Blocking; call via run_in_threadpool."""
-    from ..rainfall.provider import LIVE_ID, ECMWF_ID
+    from ..rainfall.provider import LIVE_ID, ECMWF_ID, RADAR_ID
     if scenario_id == LIVE_ID:
         res = _run_live_scenario(blockage or {"mode": "none"}, int(horizon_min))
     elif scenario_id == ECMWF_ID:
         res = _run_ecmwf_scenario(blockage or {"mode": "none"}, int(horizon_min))
+    elif scenario_id == RADAR_ID:
+        res = _run_radar_scenario(blockage or {"mode": "none"}, int(horizon_min))
     else:
         cached = _run_scenario_cached(scenario_id, _canon_blockage(blockage), int(horizon_min))
         res = copy.copy(cached)  # fresh run_id/cache-slot per call; frames/mass_balance/provenance shared read-only

@@ -47,7 +47,12 @@ def test_status():
     assert len(providers) >= 1
     for entry in providers:
         assert {"id", "source_type", "data_mode"} <= set(entry)
-        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation", "ecmwf_forecast")  # never "external_nowcast" (inert)
+        # "radar_nowcast" = the IMD radar integration boundary, always available=False (see D-14);
+        # "external_nowcast" (the deprecated inert stub) is never listed at all.
+        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation",
+                                        "ecmwf_forecast", "radar_nowcast")
+        if entry["source_type"] == "radar_nowcast":
+            assert entry["available"] is False and entry["reason"].startswith("ACCESS PENDING")
 
 
 def test_provenance():

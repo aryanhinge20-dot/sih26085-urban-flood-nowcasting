@@ -98,10 +98,40 @@ Evidence lives in `research/mumbai/*.md` and `docs/MUMBAI_FEASIBILITY.md`. Where
 
 ---
 
+### D-14 — Radar: PATH D (blocked for defensible quantitative use); ECMWF stays the only live provider
+- **Decided 2026-09-10**, on evidence from a dedicated IMD-API investigation plus an independent adversarial
+  review that re-fetched and re-measured every claim. Full evidence: `docs/LIVE_RAINFALL_AUDIT.md` §8b/§8c.
+- **No radar decoder will be built.** IMD documents no radar endpoint (dead index anchor, body ends at §20).
+  The public `sri_mum.gif` genuinely *is* mm/hr Surface Rainfall Intensity with a published Z-R relation
+  (correcting an earlier claim in this repo that it was reflectivity-only) — but its **top bin is open-ended
+  at `>100 mm/h`, below this project's own `cloudburst` (120 mm/h) and `july2005` (190.3 mm/h) intensities**,
+  with ±3.33 mm/h quantisation and ~12.5% coastline occlusion over the pilot. Decoding a rendered
+  visualisation is a lossy reconstruction of a picture, not an observation, and must never carry an
+  observation-class provenance tag.
+- **No historical hindcast is possible** from free sources: no archive, directory listings 403, ~3 Wayback
+  captures in six years.
+- **Rejected PATH C** ("access exists but quantitative rainfall unavailable") as an understatement that would
+  invite building the decoder anyway; PATH A contradicted; PATH B dead.
+
+### D-15 — The SR-01 gap is in our own engine, not only in IMD access
+- **Decided 2026-09-10.** `contracts.RainfallScenario.intensity_mm_h` is `[T]` and `intensity_at()` returns a
+  `float`, which `engine.run_simulation` hands to `runoff_fn`. **Rainfall is spatially uniform by
+  construction for every provider.** FloodNet cannot ingest a gridded rainfall field from any source, so
+  acquiring radar data would not by itself satisfy the "high-resolution/gridded" half of SR-01.
+- Generalising `RainfallScenario` to an optional `[T, ny, nx]` field is the honest prerequisite. **Not
+  implemented, not scheduled** — recorded so the requirement is never reported as merely data-blocked.
+
 ## Decisions deliberately NOT made
 - Whether to extend from Pilot A to box E (decide after measuring runtime at 10 m).
 - Depth severity thresholds — provisional bands (5/15/30/60 cm) are carried over from the Antigravity code **as working thresholds, not cited guidance**; label them so until a source is found.
 - Any live IMD integration.
+- **OPEN LICENCE QUESTION (2026-09-10):** whether IMD's public radar imagery at `mausam.imd.gov.in/Radar/`
+  may be programmatically retrieved/retained for non-commercial research. `copyRightPolicy.php` and
+  `termscondition.php` both 404, while `/responsive/disclaimer.php` asserts "© Copyright 2026 India
+  Meteorological Department" with **no licence grant**; the official supply route (`radarapi.imd.gov.in`,
+  Radar Division, `radarlab@gmail.com`) requires an account, a data request and **payment**, and its terms
+  are behind login. **No capture or harvesting job has been started, deliberately.** Resolving this needs a
+  written enquiry to the Radar Division — a human action. Do not start harvesting before it is answered.
 
 ## Superseded external artefacts
 - `Desktop/disastr/DATA_AUDIT_MUMBAI.md` — its central claim (BMC pipe data not public) is **wrong**; do not cite it.

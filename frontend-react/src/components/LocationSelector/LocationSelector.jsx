@@ -1,41 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
+// PILOT_AREAS lives in lib/locations.js (a plain data/util module, not a component) rather than here, so
+// RoutePlanner's FROM/TO search can reuse these same verified landmarks without duplicating them AND so this
+// component file only exports a component (mixing a component export with a data export here would disable
+// Fast Refresh for this file -- react(only-export-components)).
+import { PILOT_AREAS } from '../../lib/locations.js'
 import styles from './LocationSelector.module.css'
-
-const PILOT_AREAS = [
-  {
-    id: 'hindmata',
-    name: 'Hindmata Junction',
-    zone: 'MCGM F/North Ward',
-    status: 'ACTIVE PILOT',
-    desc: 'Low-elevation natural bowl with high historical flood frequency.',
-    coords: [72.8447, 19.0176],
-  },
-  {
-    id: 'dadar-tt',
-    name: 'Dadar TT Circle',
-    zone: 'MCGM F/North Ward',
-    status: 'ACTIVE PILOT',
-    desc: 'Major transit corridor connecting Dr. B.A. Road and Tilak Bridge.',
-    coords: [72.8465, 19.0205],
-  },
-  {
-    id: 'parel-tt',
-    name: 'Parel Junction',
-    zone: 'MCGM F/South Ward (Adjacent)',
-    status: 'IN PILOT BOUNDS',
-    desc: 'Hospital district connector and railway underpass zone.',
-    coords: [72.8415, 19.0085],
-  },
-  {
-    id: 'matunga',
-    name: 'Matunga East (King Circle)',
-    zone: 'MCGM F/North Ward',
-    status: 'ACTIVE PILOT',
-    desc: 'Downstream receiving basin and chronic waterlogging hotspot.',
-    coords: [72.8550, 19.0290],
-  },
-]
 
 export default function LocationSelector() {
   const { meta, pickPoint } = useFloodNet()
@@ -64,9 +34,8 @@ export default function LocationSelector() {
   const handleSelect = (area) => {
     setSelectedId(area.id)
     setOpen(false)
-    // If user selects a landmark, set point for map context if supported
     if (area.coords && pickPoint) {
-      // Pick landmark coordinate
+      pickPoint(area.coords)
     }
   }
 
@@ -125,7 +94,7 @@ export default function LocationSelector() {
 
           <div className={styles.popoverFooter}>
             <div className={styles.coverageNote}>
-              <b>Active Model Coverage:</b> High-resolution 2D coupled physics currently calibrated for Hindmata–Dadar catchment ({meta?.pilot?.name || 'Mumbai F/North'}).
+              <b>Active Model Coverage:</b> 2D coupled physics is configured for the Hindmata–Dadar catchment ({meta?.pilot?.name || 'Mumbai F/North'}) only. The model is <b>not calibrated</b> against observed flood depths — none exist publicly for this area.
             </div>
           </div>
         </div>

@@ -56,6 +56,13 @@
   opacity: 0.8;
 }
 
+.drainageLegend {
+  margin: -1px 0 3px 30px;
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
 /* ── Opacity sliders ──────────────────────────────────── */
 .sliders {
   margin-top: 12px;

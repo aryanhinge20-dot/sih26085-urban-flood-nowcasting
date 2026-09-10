@@ -116,12 +116,49 @@ def test_get_source_meta():
 def test_provider_status_never_reports_external_nowcast_active():
     """No live nowcast source is connected in this prototype -- /api/status must never claim otherwise."""
     status = provider_status()
-    assert len(status) >= 6   # moderate, heavy, cloudburst, july2005, live, ecmwf
+    assert len(status) >= 6   # moderate, heavy, cloudburst, july2005, live, ecmwf (+ the radar boundary)
     for entry in status:
-        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation", "ecmwf_forecast")
+        # "radar_nowcast" is the IMD radar integration boundary: listed, but permanently available=False
+        # (asserted below) -- it is never reported as an active source. "external_nowcast" is never listed.
+        assert entry["source_type"] in ("scenario", "historical_replay", "live_observation",
+                                        "ecmwf_forecast", "radar_nowcast")
         assert entry["source_type"] != "external_nowcast"
     ids = {e["id"] for e in status}
     assert {"moderate", "heavy", "cloudburst", "july2005", "live", "ecmwf"} <= ids
+
+
+def test_provider_status_reports_radar_as_access_pending_and_never_available():
+    """The IMD radar boundary is disabled by default (decision D-14): /api/status must say so plainly, and
+    must never report it as an available rainfall source."""
+    from floodnet.rainfall.provider import RADAR_ID
+    row = {e["id"]: e for e in provider_status()}[RADAR_ID]
+    assert row["source_type"] == "radar_nowcast"
+    assert row["available"] is False
+    assert row["reason"].startswith("ACCESS PENDING")
+    assert "LIVE_RAINFALL_AUDIT" in row["reason"]
+    assert row["data_mode"] is None      # no data mode, because no data
+
+
+def test_radar_provider_always_raises_and_never_falls_through(monkeypatch):
+    """Disabled by default, and still refuses even if the enable flag and both credentials are set -- there
+    is no documented IMD radar endpoint to call, so there is nothing honest to return."""
+    from floodnet.rainfall.provider import RADAR_ID, IMDRadarNowcastProvider
+    prov = IMDRadarNowcastProvider()
+    monkeypatch.delenv(IMDRadarNowcastProvider.ENABLED_ENV, raising=False)
+    assert prov.is_enabled() is False
+    with pytest.raises(ProviderUnavailable, match="ACCESS PENDING"):
+        prov.get()
+    with pytest.raises(ProviderUnavailable, match="ACCESS PENDING"):
+        prov.get(RADAR_ID)
+    monkeypatch.setenv(IMDRadarNowcastProvider.ENABLED_ENV, "1")
+    monkeypatch.setenv(IMDRadarNowcastProvider.API_KEY_ENV, "k")
+    monkeypatch.setenv(IMDRadarNowcastProvider.API_TOKEN_ENV, "t")
+    assert prov.is_enabled() is True and prov.is_configured() is True
+    with pytest.raises(ProviderUnavailable, match="ACCESS PENDING"):
+        prov.get()
+    with pytest.raises(KeyError):     # never serves another source's id
+        prov.get("heavy")
+    assert get_source_meta(RADAR_ID) is None
 
 
 def test_provider_status_ecmwf_needs_no_credentials():
@@ -230,13 +267,34 @@ def test_imd_provider_structured_detail_and_persistence_label(monkeypatch):
     assert scen.provenance.to_dict() == meta.provenance.to_dict()  # same object both places, not re-declared
 
 
-def test_imd_provider_sends_the_configured_key(monkeypatch):
+def test_imd_provider_sends_both_credentials_in_the_right_headers(monkeypatch):
+    """IMD's platform needs TWO different credentials: X-API-Key (subscription key) and
+    Authorization: Bearer <JWT>. The `apikey` query parameter is NOT accepted (it returns
+    {"error":"API key missing"}) and must not be sent -- it could never authenticate and would only leak the
+    key into URLs and logs. See docs/LIVE_RAINFALL_AUDIT.md."""
     _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row()]))
-    IMDObservationProvider(station_id="43003", api_key="my-secret-key").get()
+    IMDObservationProvider(station_id="43003", api_key="my-secret-key", api_token="my-jwt-token").get()
     call = _FakeClient.last_call
     assert call["params"]["id"] == "43003"
-    assert call["params"]["apikey"] == "my-secret-key"
-    assert call["headers"]["Authorization"] == "Bearer my-secret-key"
+    assert "apikey" not in call["params"]
+    assert call["headers"]["X-API-Key"] == "my-secret-key"
+    assert call["headers"]["Authorization"] == "Bearer my-jwt-token"
+
+
+def test_imd_provider_401_bodies_map_to_credential_specific_reasons(monkeypatch):
+    """IMD's three distinct 401 bodies say WHICH credential the gateway rejected; each must surface as its
+    own diagnostic, never as a generic failure and never as a substituted rainfall value."""
+    cases = {"API key missing": "IMD_API_KEY",
+             "Authorization header missing or invalid": "IMD_API_TOKEN",
+             "Invalid or expired JWT token": "IMD_API_TOKEN"}
+    for body, expected_env in cases.items():
+        _patch_httpx_client(monkeypatch, _FakeResponse(401, {"error": body}))
+        prov = IMDObservationProvider(api_key="k", api_token="t")
+        with pytest.raises(ProviderUnavailable) as exc:
+            prov.get()
+        msg = str(exc.value)
+        assert body.lower() in msg.lower(), msg
+        assert expected_env in msg, msg
 
 
 def test_imd_provider_raises_unavailable_on_http_error(monkeypatch):

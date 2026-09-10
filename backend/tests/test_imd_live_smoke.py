@@ -18,9 +18,13 @@ import pytest
 
 from floodnet.rainfall.provider import LIVE_ID, IMDObservationProvider, ProviderUnavailable
 
+# IMD's platform requires BOTH credentials (X-API-Key AND Authorization: Bearer <JWT>) -- they are different
+# values, and a key-only configuration is rejected with HTTP 401 "Authorization header missing or invalid".
+# Skip unless both are present, so this test only ever runs against a genuinely complete credential set.
 pytestmark = [
     pytest.mark.live,
-    pytest.mark.skipif(not os.environ.get("IMD_API_KEY"), reason="IMD_API_KEY not configured; see docs/LIVE_RAINFALL_AUDIT.md"),
+    pytest.mark.skipif(not (os.environ.get("IMD_API_KEY") and os.environ.get("IMD_API_TOKEN")),
+                       reason="IMD_API_KEY and/or IMD_API_TOKEN not configured; see docs/LIVE_RAINFALL_AUDIT.md"),
 ]
 
 
@@ -29,7 +33,8 @@ def test_live_fetch_returns_a_plausible_mumbai_observation():
     try:
         scen, meta = prov.get()
     except ProviderUnavailable as e:
-        pytest.fail(f"IMD_API_KEY was set but the live call still failed -- report this, don't silence it: {e}")
+        pytest.fail(f"IMD credentials were set but the live call still failed -- report this, don't silence "
+                    f"it (the message names which credential IMD rejected, if that was the cause): {e}")
     assert scen.id == LIVE_ID
     assert meta.source_type == "live_observation"
     # sanity bounds on the observed 24h total this normalises from, not a guess at today's actual weather

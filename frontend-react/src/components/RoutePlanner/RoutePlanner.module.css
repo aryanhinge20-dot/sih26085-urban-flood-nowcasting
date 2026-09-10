@@ -7,6 +7,58 @@
 .field { margin-top: 9px; }
 .field:first-of-type { margin-top: 0; }
 
+/* ── FROM/TO location search ─────────────────────────── */
+.searchWrap {
+  position: relative;
+}
+.searchDropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-raised);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  gap: 2px;
+}
+.searchItem {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.searchItem:hover {
+  background: var(--bg-hover);
+}
+.searchItemName {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.searchItemContext {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.selectedCaption {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
 .hint {
   margin-top: 6px;
   font-size: 10.5px;
@@ -141,4 +193,96 @@
 }
 .trafficNote strong {
   color: var(--text-dim);
+}
+
+/* ── route alternatives (safest/fastest/balanced) ────── */
+.candidateCard {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-top: 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius-xs);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.candidateCard:first-of-type { margin-top: 0; }
+.candidateCard:hover {
+  border-color: rgba(34,197,94,0.35);
+}
+.candidateCardSelected {
+  background: rgba(34,197,94,0.10);
+  border-color: #22C55E;
+}
+.candidateLabel {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+.candidateMetrics {
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.candidateTimeSafety {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* ── stale alternatives (computed for a different timestep than the dashboard) ─────────
+   Amber, not red: the result is not wrong, it is just out of date. Deliberately distinct
+   from .resultBox's fresh green so a stale panel can never be mistaken for a current one. */
+.resultBoxStale {
+  background: rgba(245,158,11,0.07);
+  border-color: rgba(245,158,11,0.28);
+  border-left-color: #F59E0B;
+}
+.resultBoxStale .resultHeader {
+  border-bottom-color: rgba(245,158,11,0.20);
+}
+.resultBoxStale .candidateCard:hover {
+  border-color: rgba(245,158,11,0.40);
+}
+.resultBoxStale .candidateCardSelected {
+  background: rgba(245,158,11,0.10);
+  border-color: #F59E0B;
+}
+.staleBadge {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  color: #B45309;
+  text-transform: uppercase;
+}
+.staleTime {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #B45309;
+}
+.staleNotice {
+  margin: 0 0 8px;
+  padding: 7px 9px;
+  border-radius: var(--radius-xs);
+  background: rgba(245,158,11,0.11);
+  border: 1px solid rgba(245,158,11,0.30);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.staleNotice strong {
+  color: #B45309;
+}
+.staleNotice em {
+  font-style: normal;
+  font-family: var(--mono);
+  color: var(--text);
+}
+.candidateMetricsStale {
+  color: var(--text-faint);
 }

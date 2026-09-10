@@ -59,8 +59,34 @@ const DEFAULT_LAYERS = {
   terrain: false,
 }
 
+// Order-insensitive equality check for BlockageSpec objects (backend/floodnet/api/schemas.py::BlockageSpec).
+// The backend echoes `run.blockage` back with keys in whatever order pydantic/FastAPI happens to serialise
+// them in -- NOT necessarily the order the frontend sent them in (confirmed empirically against the live
+// API: frontend sends {"mode":"fraction","fraction":0.7}, backend echoes {"fraction":0.7,"mode":"fraction"}).
+// A raw JSON.stringify(a) !== JSON.stringify(b) comparison is key-order sensitive and therefore produces
+// false "stale" positives for every non-'none' blockage. Canonicalize by pulling the known BlockageSpec
+// fields out in a fixed order (defaulting absent/undefined fields the same way on both sides) before
+// stringifying, so two specs that represent the same blockage always compare equal regardless of key order.
+function canonBlockage(b) {
+  return JSON.stringify({
+    mode: b?.mode ?? 'none',
+    fraction: b?.fraction ?? null,
+    edge_ids: b?.edge_ids ?? null,
+    share: b?.share ?? null,
+    lonlat: b?.lonlat ?? null,
+    radius_m: b?.radius_m ?? null,
+    seed: b?.seed ?? null,
+  })
+}
+
 function emptyRoute() {
   return { origin: null, dest: null, vehicle: 'car', result: null, error: null, loading: false }
+}
+
+// POST /api/route/alternatives is an additive sibling of /api/route -- separate state so the existing
+// single-route flow (`route` above) is completely unaffected by whether alternatives were ever requested.
+function emptyAlternatives() {
+  return { result: null, error: null, loading: false, selected: null }
 }
 
 export function FloodNetProvider({ children }) {
@@ -100,6 +126,7 @@ export function FloodNetProvider({ children }) {
     setCurrentT(0)
     setPlaying(false)
     setRoute(emptyRoute())
+    setAlternatives(emptyAlternatives())
   }, [])
 
   const setBlockage = useCallback((newBlockage) => {
@@ -114,12 +141,13 @@ export function FloodNetProvider({ children }) {
     setCurrentT(0)
     setPlaying(false)
     setRoute(emptyRoute())
+    setAlternatives(emptyAlternatives())
   }, [])
 
   const isStale = useMemo(() => {
     if (!run) return false
     if (run.scenario_id !== scenarioId) return true
-    if (JSON.stringify(run.blockage ?? { mode: 'none' }) !== JSON.stringify(blockage ?? { mode: 'none' })) return true
+    if (canonBlockage(run.blockage) !== canonBlockage(blockage)) return true
     return false
   }, [run, scenarioId, blockage])
 
@@ -143,6 +171,19 @@ export function FloodNetProvider({ children }) {
   const [explainError, setExplainError] = useState(null)
 
   const [route, setRoute] = useState(emptyRoute())
+  const [alternatives, setAlternatives] = useState(emptyAlternatives())
+
+  // Unlike the single-route flow (see the auto-replan effect below, keyed off `route.result.t_min !==
+  // currentT`), alternatives are never auto-recomputed on scrub -- evaluated and rejected as too costly by
+  // the routing agent that built this feature. Consumers (map/panel) still need a signal that the currently
+  // displayed candidates were computed for a DIFFERENT timestep than the rest of the dashboard, so they can
+  // dim/dash stale candidates and surface a "stale, click Compare to refresh" affordance. Computed the same
+  // way the single-route staleness check works; this file does not act on it itself.
+  const alternativesStale = useMemo(
+    () => Boolean(alternatives?.result && alternatives.result.t_min !== currentT),
+    [alternatives, currentT],
+  )
+
   const [layers, setLayers] = useState(DEFAULT_LAYERS)
   const [terrainOpacity, setTerrainOpacity] = useState(0.40)
   const [depthOpacity, setDepthOpacity] = useState(0.50)
@@ -211,6 +252,12 @@ export function FloodNetProvider({ children }) {
     setSeries(null)
     setSelectedSegId(null)
     setExplain(null)
+    // A fresh run (even with "the same" scenario/blockage inputs -- e.g. a new live ECMWF pull) invalidates
+    // any route/alternatives computed against the previous run_id; the single-route auto-replan effect keys
+    // off `route.result.t_min !== currentT`, which would NOT catch this since currentT resets to the same
+    // starting value both times. Clear both to their empty states, same as setScenarioId/setBlockage do.
+    setRoute(emptyRoute())
+    setAlternatives(emptyAlternatives())
     const firstT = res.frames_t_min?.[0] ?? 0
     setCurrentT(firstT)
   }, [])
@@ -263,7 +310,13 @@ export function FloodNetProvider({ children }) {
     async (horizonMin = 180) => {
       if (!scenarioId) return
       let spec = blockage
-      if (!spec || spec.mode === 'none') spec = { mode: 'fraction', fraction: 0.5 }
+      if (!spec || spec.mode === 'none') {
+        spec = { mode: 'fraction', fraction: 0.5 }
+        // Keep the `blockage` state variable in sync with what's actually being compared -- otherwise
+        // run.blockage (set to `spec` below) no longer matches `blockage`, and isStale would correctly-but-
+        // unhelpfully flag the resulting compare run as stale, hiding the "Viewing BLOCKED run" indicator.
+        setBlockage(spec)
+      }
       setSimulating(true)
       setSimError(null)
       startStageCycle()
@@ -283,6 +336,11 @@ export function FloodNetProvider({ children }) {
         setSeries(null)
         setSelectedSegId(null)
         setExplain(null)
+        // Same reasoning as applyRun(): a new compare run invalidates any route/alternatives computed
+        // against the previous run_id, and the auto-replan effect won't catch it since currentT resets to
+        // the same starting value every time.
+        setRoute(emptyRoute())
+        setAlternatives(emptyAlternatives())
         setCurrentT(c.frames_t_min?.[0] ?? 0)
       } catch (e) {
         setSimError(e.message)
@@ -292,7 +350,7 @@ export function FloodNetProvider({ children }) {
         setSimulating(false)
       }
     },
-    [scenarioId, blockage, startStageCycle, stopStageCycle, notify],
+    [scenarioId, blockage, setBlockage, startStageCycle, stopStageCycle, notify],
   )
 
   // ---------------------------------------------------------------- timeline / frames
@@ -394,7 +452,10 @@ export function FloodNetProvider({ children }) {
     },
     [currentT, run],
   )
-  const clearRoute = useCallback(() => setRoute(emptyRoute()), [])
+  const clearRoute = useCallback(() => {
+    setRoute(emptyRoute())
+    setAlternatives(emptyAlternatives())
+  }, [])
 
   // Automatically re-evaluate route when timeline moves, if an active route was already evaluated
   useEffect(() => {
@@ -404,6 +465,28 @@ export function FloodNetProvider({ children }) {
       }
     }
   }, [currentT, run, route.origin, route.dest, route.vehicle, route.result, route.loading, planRoute])
+
+  // ---------------------------------------------------------------- route alternatives (safest/fastest/balanced)
+  // Additive: a completely separate request/response cycle from planRoute() above, so the existing single-route
+  // panel/map behaviour is unaffected whether or not alternatives are ever requested.
+  const planRouteAlternatives = useCallback(
+    async ({ origin, dest, vehicle, tMin = currentT, nCandidates = 3 }) => {
+      setAlternatives((a) => ({ ...a, loading: true, error: null }))
+      try {
+        const result = await api.findRouteAlternatives({ origin, dest, vehicle, tMin, runId: run?.run_id ?? null, nCandidates })
+        const rec = result?.recommended || {}
+        const defaultSelected = rec.balanced ?? rec.safest ?? rec.fastest ?? (result?.candidates?.length ? 0 : null)
+        setAlternatives({ result, error: null, loading: false, selected: defaultSelected })
+      } catch (e) {
+        setAlternatives({ result: null, error: e.message, loading: false, selected: null })
+      }
+    },
+    [currentT, run],
+  )
+
+  const selectAlternative = useCallback((index) => {
+    setAlternatives((a) => ({ ...a, selected: index }))
+  }, [])
 
   /** RoutePlanner's vehicle selector writes here directly (no local component state) so a map click
    * (Context.pickPoint, below) always uses whatever vehicle is currently selected in the panel, rather than
@@ -473,6 +556,10 @@ export function FloodNetProvider({ children }) {
       clearRoute,
       setRouteVehicle,
       pickPoint,
+      alternatives,
+      alternativesStale,
+      planRouteAlternatives,
+      selectAlternative,
       layers,
       toggleLayer,
       terrainOpacity,
@@ -486,7 +573,8 @@ export function FloodNetProvider({ children }) {
       meta, status, provenance, scenarios, currentScenario, scenarioId, setScenarioId, blockage, setBlockage, isStale, bootLoading, bootError,
       roads, topology, hotspots, terrain, run, compareResult, series, frame, currentT, playing, simulating,
       simStageIdx, simError, liveAttempt, ecmwfAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
-      explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, layers, toggleLayer, terrainOpacity, depthOpacity, notice, notify,
+      explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, alternatives, alternativesStale, planRouteAlternatives, selectAlternative,
+      layers, toggleLayer, terrainOpacity, depthOpacity, notice, notify,
     ],
   )
 

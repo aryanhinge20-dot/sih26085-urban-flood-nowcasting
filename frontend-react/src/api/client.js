@@ -92,3 +92,15 @@ export const findRoute = ({ origin, dest, tMin = 0, vehicle = 'car', runId = nul
     method: 'POST',
     body: { origin, dest, t_min: tMin, vehicle, run_id: runId },
   })
+
+// Multiple candidate routes scored under three objectives (see backend/floodnet/routing/router.py
+// safe_routes_multi's docstring): "safest" (flood-depth-penalised), "fastest" (DISTANCE only -- there is no
+// travel-time/speed model anywhere in the graph, so this must stay labelled "by distance" wherever it is
+// shown), and "balanced" (a blended objective between the two). Each candidate also carries `time_safety`
+// (safe-through-T+X vs. unsafe-by-T+X) when a simulation run is active, computed from the same per-segment
+// series GET /api/simulation/{run_id}/series already serves.
+export const findRouteAlternatives = ({ origin, dest, tMin = 0, vehicle = 'car', runId = null, nCandidates = 3 }) =>
+  request('/api/route/alternatives', {
+    method: 'POST',
+    body: { origin, dest, t_min: tMin, vehicle, run_id: runId, n_candidates: nCandidates },
+  })

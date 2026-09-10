@@ -24,6 +24,7 @@ are recorded so this can be re-verified independently.
 | 12 | Open Government Data Platform | `data.gov.in` rainfall catalogue | IMD-sourced datasets, generally daily/normal statistics, not real-time |
 | 13 | IMD's own PDF on API access | `mausam.imd.gov.in/Forecast/marquee_data/API_doc.pdf` | States the actual registration process (see §3) |
 | 14 | API Setu (govt. API directory) | `directory.apisetu.gov.in/api-collection/mausam` | Listing page found; no usable additional detail beyond what's above |
+| 15 | IMD Radar Data Supply Portal (found 2026-09-10, follow-up pass) | `radarapi.imd.gov.in` → redirects (HTTP 302, verified live) to `radarapi.imd.gov.in/dsp/frontend/login` | Distinct from the `api.imd.gov.in` nodal-officer process — has a **"Sign up"** link (self-service or semi-self-service account creation, unlike `api.imd.gov.in`). Sibling portal `dsp.imdpune.gov.in` describes supplying **historical** meteorological/climate data including "radar data," operational since Mar 2019 (v5.0 since Oct 2024), enrollment/login required (introduced Aug 2021), **not free** for most data (cost estimates before purchase; some free data exists), commercial reproduction requires permission. **Not yet classified** — whether it offers a real-time/near-real-time gridded rainfall *nowcast* (vs. only a historical archive of radar imagery/volumes), whether Mumbai is covered, exact pricing, and approval turnaround are all genuinely **UNVERIFIED** (would require creating an account, out of scope for this audit without separate authorisation). Recorded here as an unexplored lead, not a solved gap — does not change §4's classification or the SR-01 conclusion below. |
 
 ## 2. Empirical verification (not assumed)
 
@@ -58,7 +59,7 @@ reliable programmatic source. D = unavailable/unsuitable.**
 | Source | Class | Why |
 |---|---|---|
 | api.imd.gov.in (all 28 documented endpoints) | **B** | Documented, structured, real API — but every endpoint requires a key (empirically confirmed), the key requires a manual nodal-officer approval process with no published SLA, and the portal states IP whitelisting is required |
-| Mumbai radar imagery (`mausam.imd.gov.in/responsive/radar.php`) | **C** | Public webpage, images only, not a documented data API; the *gated* API's own radar endpoint is also documented as returning an **Image**, not gridded rainfall — genuine radar QPE integration is out of reach either way without image-processing work far beyond this audit's scope |
+| Mumbai radar imagery (`mausam.imd.gov.in/responsive/radar.php`) | **C** | Public webpage, rendered images, not a documented data API. **Two claims in the original wording of this row were corrected on 2026-09-10 (see §8c):** (i) the Mumbai `sri_*` product is *not* only reflectivity — it is Surface Rainfall Intensity in **mm/hr** with the Z-R relation printed in-band; (ii) this audit previously stated the gated API's radar endpoint "is documented as returning an Image" — that is **unsupported**: there is no radar section in the API reference at all, only a dead index anchor. The class **C** verdict nonetheless stands, for the reasons in §8c. |
 | District-wise/Station-wise Nowcast (`districtnowcast`/`stationnowcast`) | **B, but not usable as intended** | Real, documented, gated API — but the nowcast is **categorical** (colour/severity bands, e.g. "Cat12: Heavy rain: > 15 mm/hr"), never a quantitative mm/h value. Even with a key, this cannot honestly become a rainfall intensity time series without inventing precision IMD never published |
 | AWS/ARG Data (`aws_data`) | **D** for rainfall purposes | Documented fields are temperature/humidity/wind/pressure — **no precipitation field at all** |
 | IITM Mumbai MESONET (`mumbairain.tropmet.res.in`) | **C** | Real, dense (139 stations, 15-min), genuinely the best-resolution Mumbai rain network found — but no documented API; the page states data is available on request via email to the curator, not programmatically. Reverse-engineering its dashboard's network calls would be scraping an undocumented endpoint, which this audit was explicitly told not to do |
@@ -174,6 +175,122 @@ is already correct and tested for it) intentionally left out of this pass's scop
   real FloodNet run.
 - Full backend suite: **101 passed, 2 skipped** (the two opt-in live tests) — up from 90 passed before this
   pass; zero regressions.
+
+## 8b. Follow-up: historical radar nowcasting feasibility (2026-09-10)
+
+A deeper, dedicated pass investigated whether genuine HISTORICAL (not live) Mumbai Doppler radar data could
+support a defensible motion-estimation nowcast demo, without creating any external account (out of scope for
+that pass) and without treating the `radarapi.imd.gov.in` Radar Data Supply Portal lead from §1 row 15 as
+solved. Findings:
+
+- `dsp.imdpune.gov.in`'s own "Data Formats & Cost Estimation" tool — the closest thing IMD publishes to a
+  product/pricing catalogue — lists Surface, Rainfall, Autographic, Upper Air, Agromet, and Radiation as its
+  data types. **Radar is not among them**; radar is administered separately, by the Radar Division (Delhi,
+  contact `radarlab@gmail.com` / Dr. Soma Sen Roy, per `radarapi.imd.gov.in/dsp/frontend/contact`), reachable
+  only after account creation + approval, with pricing not published anywhere found.
+- Independent, credible evidence (open-source tooling — `xradar`, `PyScanCf`, part of the Py-ART/"Open Radar
+  Science" ecosystem — built specifically to read IMD's raw sweep files) confirms IMD's actual internal radar
+  product genuinely is quantitative (NetCDF4, IRIS-inspired, 2-10 files per volume) — i.e. the underlying data
+  is real and usable in principle — but no public catalogue, sample file, pricing table, or download path was
+  found reachable without the gated account/approval process above.
+- No open, DOI-linked, or `data.gov.in`-hosted historical Mumbai/Veravali radar dataset was found.
+- The linked official radar-portal User Guide PDF 404s on direct fetch; an IMD radar-applications training PDF
+  is reachable but is image-only (no OCR tooling available in this environment) — both genuinely UNVERIFIED,
+  not confirmed negative.
+- **Conclusion: unchanged from §4/§6 above, now with deeper evidence** — no source reaches class A, and the
+  gated class-B path (`radarapi.imd.gov.in`) was investigated as far as possible without account creation.
+  **No radar-based feature is being implemented.**
+- Scientific feasibility check (grounded in `pysteps`'s own documentation, fetched directly): its worked
+  STEPS-nowcast example uses 3 frames at 5-min cadence for a 30-min forecast; the underlying paper (Pulkkinen
+  et al. 2019) reports reliable skill up to ~2h given genuine quantitative gridded input. `pysteps` (BSD-3,
+  not currently a dependency — confirmed via grep, only appears in docstrings/docs) would be an appropriate
+  tool *if* quantitative radar/precipitation fields were ever obtained — the blocker is data access, not
+  technique.
+- One adjacent, clearly-different-class dataset was surfaced and explicitly NOT pursued: NASA/JAXA **GPM
+  IMERG** (satellite multi-sensor precipitation estimation, 0.1°/30-min, freely available for historical dates
+  via a NASA Earthdata account). This is **not radar** and must never be labeled as such if a future pass ever
+  decides to use it — recorded here only so it isn't silently rediscovered and mislabeled later.
+
+## 8c. IMD API + DWR deep investigation, and the PATH D decision (2026-09-10)
+
+A dedicated IMD-API investigation, followed by an **independent adversarial review** that re-fetched and
+re-measured every claim, resolved the radar question. Both agents worked from IMD's own pages; neither
+registered an account. Findings below are labelled by the reviewer's verdict.
+
+**VERIFIED — there is no documented radar API.** `api.imd.gov.in/public/api_reference.html` indexes 28 APIs
+(`#api-1`…`#api-28`) but its DOM contains only `id="api-1"`…`id="api-20"`; the body ends after "20) Cyclone
+Cone of Uncertainty". "Radar Image" (`#api-25`) and "Lightning Data" (`#api-26`) are **dead anchors** — no
+endpoint, parameters, response format, or resolution is published for radar anywhere on that page.
+
+**VERIFIED — endpoint existence cannot be probed.** Auth is evaluated *before* routing: a deliberately
+nonsensical path (`/api/v1/definitely_not_a_real_endpoint_xyz`) returns byte-identical 401s to a real one.
+Auth requires two headers — `X-API-Key` and `Authorization: Bearer <JWT>` — evidenced by three distinct 401
+bodies. Note this proves two required *headers*, not necessarily two separately-issued credentials; a
+placeholder key passes the first gate, so key *validity* is untestable without a real credential.
+
+**VERIFIED — the public `sri_mum.gif` product genuinely is rainfall intensity, not reflectivity.** It prints
+in-band: `DWR MUMBAI (18.9013N, 72.8075E, 100.0 mts)`, `Method Type: Z-R`, `Constant (a/b): (152.0/1.5)`,
+`Display Range: 150 Km`, a UTC timestamp, and a legend headed **`mm/hr`** with 15 bins. This corrects the
+original §4 row. A rolling animation (`animation/Converted/MUM_SRI.gif`) holds 11 distinct timestamps
+spanning 2 h 53 m at bimodal ~10.2/~20.4 min spacing.
+
+**But the product is NOT usable as a FloodNet rainfall input, for measured reasons:**
+- **The top bin is open-ended at `>100 mm/h`.** FloodNet's own `cloudburst` scenario peaks at **120 mm/h** and
+  the `july2005` replay reaches **190.3 mm/h**. The product cannot distinguish either from 101 mm/h — it
+  censors precisely the intensity regime this system exists to model. This alone is disqualifying.
+- **Quantisation is ±3.33 mm/h** (bins 6.65 mm/h wide).
+- **~12.5% of the pilot footprint is occluded** by the drawn coastline vector — Dadar sits on the coastline,
+  so the loss is systematic and located exactly where the pilot is, not averageable noise.
+- **"No Data", sub-threshold, and out-of-domain share one RGB** — no-echo is indistinguishable from off-disc.
+- **Rain rate is inferred at 2.0 km height**, not at the surface; publication latency measured at 30–40 min;
+  and the GIF is **resampled** (0.4277 km/px rendered, fitted from range rings, vs the 0.4 km/px stated).
+- The earlier "96.6% of pixels decode exactly" statistic was **reproduced (96.40%) and shown to be
+  misleading**: 96.27 of those points are the No-Data background colour; actual rain-bin pixels were 0.13%.
+  The statistic measured empty sky. (The narrower claim that the palette has no anti-aliasing *is* robust —
+  only 7 distinct RGB values appear in the whole plot panel — but colour→bin being deterministic does not
+  make bin→rainfall defensible.)
+
+**VERIFIED — no free historical archive.** `/Radar/` and its subpaths return 403 (no listing), date-stamped
+filename guesses 404, and the Internet Archive holds only ~3 captures of `sri_mum.gif` across six years. A
+retrospective radar hindcast of a past Mumbai flood is **not possible** from free sources.
+
+**Licensing is worse than previously recorded.** `copyRightPolicy.php` and `termscondition.php` both 404, but
+`/responsive/disclaimer.php` returns 200 with an affirmative **"© Copyright 2026 India Meteorological
+Department"** and **no licence grant** — an explicit copyright assertion is worse than silence. The official
+route for DWR data is `radarapi.imd.gov.in` (Radar Data Supply Portal): account signup + data request +
+**payment**, contact `radarlab@gmail.com`, Radar Division. Its terms sit behind login and are **UNKNOWN** —
+no account was created.
+
+**VERIFIED — AWS/ARG documents no precipitation field** (confirming the earlier finding). Separately, the
+District/Station Nowcast APIs are **categorical** (`Cat1`…`Cat19`, top rain band open-ended at ">15 mm/hr"),
+not a quantitative nowcast. River Basin QPF does carry quantitative areal precipitation but is Day1–Day5
+daily — far too coarse for a 0–3 h horizon.
+
+### The structural finding that reframes SR-01
+
+**FloodNet's engine cannot ingest a spatial rainfall field from ANY source.** `contracts.RainfallScenario`
+carries `intensity_mm_h` as a **`[T]` array** and `intensity_at(t)` returns a single **`float`**;
+`engine.run_simulation` passes that scalar to `runoff_fn`. Rainfall is therefore spatially uniform over the
+pilot by construction, regardless of provider. Consequently the radar product's coarse footprint over the
+pilot (~5.6 × 5.9 radar pixels) costs nothing — **the binding constraint is FloodNet's own scalar interface,
+not IMD data access.** Obtaining perfect radar data tomorrow would not, by itself, move SR-01 one step.
+
+### Decision: PATH D
+
+Radar access is blocked for defensible quantitative use. **ECMWF remains the only live provider**, labelled
+exactly as it is today — a real NWP forecast, never a radar nowcast, never an IMD product. No radar decoder
+is being built: decoding a rendered visualisation is a lossy reconstruction of a *picture*, not an
+observation, and must never be tagged as radar-derived measurement.
+
+**Deliberately rejected: PATH C** ("radar access exists but quantitative rainfall is unavailable"). It
+understates the case — mm/hr values *are* nominally present — and would invite someone to build the decoder
+anyway. **PATH A** is contradicted (no endpoint, no credential, unusable product); **PATH B** is dead (no
+archive).
+
+**Open, unresolved, and logged rather than assumed:** the `mausam` imagery licence question. No capture or
+harvesting job has been started. The evidence-gathering step that costs nothing and unblocks the most is a
+written enquiry to the Radar Division (`radarlab@gmail.com`) covering both DWR data terms and permission for
+programmatic use of the public imagery — a human action, not an agent one.
 
 ## 9. Remaining limitations (stated, not hidden)
 

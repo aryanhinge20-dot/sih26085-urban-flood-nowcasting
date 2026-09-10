@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import HeroVisual from './HeroVisual.jsx'
 import styles from './LandingPage.module.css'
 
 const STORY_STAGES = [
@@ -7,16 +8,16 @@ const STORY_STAGES = [
     num: '01',
     phase: 'RAIN',
     headline: 'Rainfall enters the system.',
-    description: 'ECMWF numerical weather prediction and automated rain gauges deliver spatial precipitation intensity across the 0–3 hour horizon.',
-    metric: 'Spatial precipitation (mm/h)',
+    description: 'ECMWF numerical weather prediction, historical gauge records, or synthetic design storms drive the model across the 0–3 hour horizon. Rainfall is applied uniformly over the pilot — the engine does not currently ingest a spatially varying rainfall field.',
+    metric: 'Rainfall intensity (mm/h), uniform',
   },
   {
     id: 'runoff',
     num: '02',
     phase: 'RUNOFF',
     headline: 'Impervious surfaces convert it into runoff.',
-    description: 'High urban density and concrete streetscapes limit infiltration, converting 85%+ of rainfall volume directly into rapid surface runoff.',
-    metric: 'Runoff coefficient C = 0.85',
+    description: 'High urban density and concrete streetscapes limit infiltration, converting most rainfall volume into rapid surface runoff.',
+    metric: 'Rational method, per-cell C',
   },
   {
     id: 'terrain',
@@ -31,7 +32,7 @@ const STORY_STAGES = [
     num: '04',
     phase: 'DRAINAGE',
     headline: 'Capacity limits create surcharge.',
-    description: 'When stormwater conduits exceed hydraulic conveyance or encounter high-tide backflow, water surcharges up through street gully inlets.',
+    description: 'When stormwater conduits exceed hydraulic conveyance, inlets can no longer carry away the water they capture, and it accumulates at street level. Tidal backflow at outfalls is not currently modeled.',
     metric: 'Capacity-limited graph hydraulics',
   },
   {
@@ -39,15 +40,15 @@ const STORY_STAGES = [
     num: '05',
     phase: 'FLOOD',
     headline: 'Street depth evolves over time.',
-    description: 'Surface runoff and pipe surcharge couple to compute continuous centimeter-accurate flood depth along every roadway corridor in the ward.',
-    metric: 'Centimeter depth resolution',
+    description: 'Surface runoff and pipe surcharge couple to compute continuous street-level flood depth, reported in centimeters, along every roadway corridor in the ward.',
+    metric: 'Depth reported in cm',
   },
   {
     id: 'action',
     num: '06',
     phase: 'ACTION',
     headline: 'Emergency routes adapt to risk.',
-    description: 'Dijkstra risk-aware routing dynamically navigates emergency vehicles around impassable depths, guaranteeing safe transit corridors.',
+    description: 'Dijkstra risk-aware routing navigates emergency vehicles around modeled impassable depths, based on current forecast conditions.',
     metric: 'Vehicle threshold clearance',
   },
 ]
@@ -121,9 +122,11 @@ export default function LandingPage({ onEnter, isTransitioning }) {
         </div>
       </nav>
 
-      {/* 2. Hero Section: restrained geographic backdrop (no particle/cyber-grid effects) */}
+      {/* 2. Hero Section: restrained geographic backdrop + isolated hero visual (self-contained,
+             purely decorative, error-boundary-wrapped -- see HeroVisual.jsx) */}
       <header className={styles.heroSection}>
         <div className={styles.heroTerrainBackdrop} aria-hidden="true" />
+        <HeroVisual />
 
         {/* Scientific HUD Micro-labels & Spatial Telemetry */}
         <div className={styles.hudOverlay} aria-hidden="true">
@@ -132,7 +135,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
               <span className={styles.hudBullet} />
               MUMBAI PILOT
             </div>
-            <div className={styles.hudCoords}>19.0064° N, 72.8422° E // ELEV 3.2m</div>
+            <div className={styles.hudCoords}>72.835–72.855° E, 19.010–19.030° N</div>
             <div className={styles.hudSub}>MCGM F/N &amp; F/S &middot; HINDMATA DEPRESSION</div>
           </div>
 
@@ -213,12 +216,12 @@ export default function LandingPage({ onEnter, isTransitioning }) {
             <div className={styles.telemSep} />
             <div className={styles.telemCol}>
               <span className={styles.telemTag}>STREET NETWORK</span>
-              <span className={styles.telemData}>900+ Segments</span>
+              <span className={styles.telemData}>2,978 Segments</span>
             </div>
             <div className={styles.telemSep} />
             <div className={styles.telemCol}>
-              <span className={styles.telemTag}>OUTPUT ACCURACY</span>
-              <span className={styles.telemData}>Centimeter Depth</span>
+              <span className={styles.telemTag}>DEPTH UNITS</span>
+              <span className={styles.telemData}>Reported in cm</span>
             </div>
             <div className={styles.telemSep} />
             <div className={styles.telemCol}>
@@ -304,7 +307,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
                     strokeWidth="2"
                   />
                   <text x="400" y="270" fill="#2563A8" fontSize="11" fontFamily="var(--mono)" textAnchor="middle" fontWeight="700">
-                    Hindmata Inundation (269 cm)
+                    Hindmata Depression (schematic)
                   </text>
                 </g>
               )}
@@ -329,7 +332,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
               {/* Station Annotations */}
               <text x="80" y="270" fill="#6E6255" fontSize="10" fontFamily="var(--font)" fontWeight="600">Parel Junction</text>
               <text x="400" y="345" fill="#6E6255" fontSize="10" fontFamily="var(--mono)" textAnchor="middle" fontWeight="600">
-                Depression Invert: 3.2m MSL
+                Hindmata Depression
               </text>
               <text x="680" y="235" fill="#6E6255" fontSize="10" fontFamily="var(--font)" fontWeight="600">Dadar TT Circle</text>
             </svg>
@@ -372,7 +375,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
             <div className={styles.pillarIcon}>01</div>
             <h3 className={styles.pillarTitle}>Forecast where water accumulates</h3>
             <p className={styles.pillarDesc}>
-              Street-level 3-hour nowcasting computed at 5-minute intervals. Centimeter-accurate depths across 900+ road segments.
+              Street-level 3-hour forecasting computed at 5-minute intervals. Depths reported in centimeters across 2,978 road segments.
             </p>
           </div>
           <div className={styles.pillarCard}>
@@ -408,7 +411,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
             <span className={styles.cardIndex}>01 / METEOROLOGY</span>
             <h4 className={styles.cardHeading}>Numerical Weather Prediction</h4>
             <p className={styles.cardBody}>
-              ECMWF high-resolution precipitation forecasts and IMD automated telemetry downscaled into 5-minute hyetographs.
+              ECMWF numerical weather prediction (NWP) forecasts, historical storm records, and synthetic design-storm scenarios — each clearly labeled by source — resampled into 5-minute simulation timesteps.
             </p>
           </div>
 
@@ -444,26 +447,26 @@ export default function LandingPage({ onEnter, isTransitioning }) {
           <span className={styles.sectionKicker}>Pilot Study Area</span>
           <h2 className={styles.pilotTitle}>Mumbai &middot; Hindmata / Dadar Corridor</h2>
           <p className={styles.pilotDesc}>
-            Encompassing MCGM F/North and F/South municipal wards. Hindmata sits in a natural topographic bowl
-            (invert 3.2m MSL), historically vulnerable to simultaneous high-intensity monsoon rainfall and coastal tidal lock.
+            Encompassing MCGM F/North and F/South municipal wards. Hindmata sits in a natural topographic bowl,
+            historically vulnerable to high-intensity monsoon rainfall.
           </p>
 
           <div className={styles.pilotMetrics}>
             <div className={styles.pilotMetricItem}>
-              <span className={styles.pilotMetricVal}>900+</span>
+              <span className={styles.pilotMetricVal}>2,978</span>
               <span className={styles.pilotMetricLabel}>Street Segments</span>
             </div>
             <div className={styles.pilotMetricItem}>
-              <span className={styles.pilotMetricVal}>14</span>
-              <span className={styles.pilotMetricLabel}>Arterial Corridors</span>
+              <span className={styles.pilotMetricVal}>1,233</span>
+              <span className={styles.pilotMetricLabel}>Drainage Nodes</span>
             </div>
             <div className={styles.pilotMetricItem}>
               <span className={styles.pilotMetricVal}>5 min</span>
               <span className={styles.pilotMetricLabel}>Timestep Resolution</span>
             </div>
             <div className={styles.pilotMetricItem}>
-              <span className={styles.pilotMetricVal}>30 cm</span>
-              <span className={styles.pilotMetricLabel}>Emergency Clearance</span>
+              <span className={styles.pilotMetricVal}>40 cm</span>
+              <span className={styles.pilotMetricLabel}>Ambulance Clearance</span>
             </div>
           </div>
         </div>
@@ -483,7 +486,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
               <h4 className={styles.capTitle}>ECMWF, Replay &amp; Cloudburst</h4>
             </div>
             <p className={styles.capBody}>
-              Run live NWP forecasts, replay historical benchmark storms (such as July 2005 944 mm), or simulate acute cloudburst stress tests.
+              Run ECMWF NWP forecasts, replay the July 2005 Mumbai deluge (380.8 mm in 3 hours, per the Chitale Committee report), or simulate synthetic cloudburst stress tests.
             </p>
           </div>
 
@@ -525,15 +528,15 @@ export default function LandingPage({ onEnter, isTransitioning }) {
           <span className={styles.sectionKicker}>Data Integrity &middot; Scientific Grounding</span>
           <h3 className={styles.trustTitle}>Honest Geospatial Data Attribution</h3>
           <p className={styles.trustDesc}>
-            FloodNet operates exclusively on verifiable meteorological forecasts and physics-based hydrodynamic solvers.
-            Model results are never synthetic hallucinations; forecasts explicitly declare source type, run timestamps,
-            and hydraulic blockage assumptions.
+            FloodNet runs on real MCGM drainage geometry, OpenStreetMap road networks, and a physics-based hydrodynamic
+            solver. Every input — real, estimated, synthetic, or historical replay — is explicitly labeled by source
+            and never presented as something it isn't.
           </p>
           <div className={styles.trustBadges}>
             <span className={styles.trustBadge}>ECMWF Open Data NWP</span>
             <span className={styles.trustBadge}>OpenStreetMap Mumbai Geometry</span>
             <span className={styles.trustBadge}>10m Digital Elevation Model</span>
-            <span className={styles.trustBadge}>MCGM Stormwater Network Calibration</span>
+            <span className={styles.trustBadge}>MCGM Stormwater Network Geometry</span>
           </div>
         </div>
       </section>

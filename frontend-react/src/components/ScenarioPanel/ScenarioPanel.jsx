@@ -9,7 +9,7 @@ import styles from './ScenarioPanel.module.css'
 const BLOCKAGE_OPTIONS = [
   { value: 'none',    label: 'None — all drains clear (0%)',              spec: { mode: 'none' } },
   { value: 'half',    label: 'Uniform 50% blockage (what-if)',            spec: { mode: 'fraction', fraction: 0.5 } },
-  { value: 'seventy', label: 'Uniform 70% blockage (what-if, validated demo case)', spec: { mode: 'fraction', fraction: 0.7 } },
+  { value: 'seventy', label: 'Uniform 70% blockage (what-if)', spec: { mode: 'fraction', fraction: 0.7 } },
   { value: 'random',  label: 'Random 30% of drains at 60% (what-if)',     spec: { mode: 'random', share: 0.3, fraction: 0.6 } },
 ]
 
@@ -222,20 +222,6 @@ export default function ScenarioPanel() {
         )
       )}
 
-      <div className={styles.field}>
-        <label className="field-label" htmlFor="blockage-select">Blockage scenario (what-if)</label>
-        <select
-          id="blockage-select"
-          value={blockageKey}
-          onChange={(e) => setBlockage(BLOCKAGE_OPTIONS.find((o) => o.value === e.target.value)?.spec)}
-          disabled={simulating}
-        >
-          {BLOCKAGE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-      </div>
-
       <div className={styles.actions}>
         <button
           className="btn btn-primary btn-block"
@@ -247,14 +233,36 @@ export default function ScenarioPanel() {
             <><span className={styles.btnSpinner} aria-hidden="true" />Generating forecast…</>
           ) : 'Run forecast'}
         </button>
-        <button
-          className="btn btn-block"
-          onClick={() => runCompare()}
-          disabled={simulating || !scenarioId}
-        >
-          Compare normal vs blocked
-        </button>
       </div>
+
+      {/* Blockage is a secondary what-if exploration, not part of the primary
+          rainfall -> forecast path — kept collapsed by default so only the
+          scenario selector and "Run forecast" show in the default state. */}
+      <details className={styles.whatIf}>
+        <summary className={styles.whatIfSummary}>What-if: reduced drainage capacity (optional)</summary>
+        <div className={styles.whatIfBody}>
+          <div className={styles.field}>
+            <label className="field-label" htmlFor="blockage-select">Blockage scenario (what-if)</label>
+            <select
+              id="blockage-select"
+              value={blockageKey}
+              onChange={(e) => setBlockage(BLOCKAGE_OPTIONS.find((o) => o.value === e.target.value)?.spec)}
+              disabled={simulating}
+            >
+              {BLOCKAGE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <button
+            className={`btn btn-block ${styles.whatIfActions}`}
+            onClick={() => runCompare()}
+            disabled={simulating || !scenarioId}
+          >
+            Compare normal vs blocked
+          </button>
+        </div>
+      </details>
 
       {simError && <div className={styles.errBox}>{simError}</div>}
 
@@ -267,13 +275,17 @@ export default function ScenarioPanel() {
         <div className={styles.runSummary}>
           {run.__isCompareBlocked && (
             <div className={styles.compareNote}>
-              Viewing <strong>BLOCKED</strong> run — normal (brass) vs blocked (terracotta) on timeline
+              Viewing <strong>BLOCKED</strong> run — normal (blue) vs blocked (orange) on timeline
             </div>
           )}
           <div className={styles.summaryGrid}>
             <div className={styles.summaryCell}>
               <span className={styles.summaryCellLabel}>Forecast peak depth</span>
               <span className={styles.summaryCellValue}>{fmt(summary.max_depth_cm, 0)} cm</span>
+            </div>
+            <div className={styles.summaryCell}>
+              <span className={styles.summaryCellLabel}>Surcharge volume</span>
+              <span className={styles.summaryCellValue}>{fmt(summary.total_surcharge_m3, 0)} m³</span>
             </div>
             <div className={styles.summaryCell}>
               <span className={styles.summaryCellLabel}>Flooded segs</span>

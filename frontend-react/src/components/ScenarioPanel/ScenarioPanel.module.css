@@ -29,6 +29,30 @@
   margin-top: 12px;
 }
 
+/* ── What-if (blockage) — collapsed by default; secondary to the
+   rainfall -> forecast primary path ─────────────────────── */
+.whatIf {
+  margin-top: 10px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+}
+.whatIfSummary {
+  cursor: pointer;
+  padding: 8px 9px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  transition: color var(--transition-fast);
+}
+.whatIfSummary:hover { color: var(--text-dim); }
+.whatIfBody {
+  padding: 0 9px 9px;
+}
+.whatIfActions { margin-top: 8px; }
+
 /* Loading spinner */
 .btnSpinner {
   display: inline-block;
@@ -166,8 +190,11 @@
   border-bottom: 1px solid var(--border);
 }
 .summaryCell:nth-child(even) { border-right: none; }
-.summaryCell:nth-child(3),
-.summaryCell:nth-child(4)    { border-bottom: none; }
+.summaryCell:last-child {
+  border-bottom: none;
+  border-right: none;
+  grid-column: 1 / -1;
+}
 
 .summaryCellLabel {
   display: block;

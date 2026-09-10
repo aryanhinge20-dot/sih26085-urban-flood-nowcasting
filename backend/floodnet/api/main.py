@@ -13,11 +13,14 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .. import config
 from ..contracts import SimulationResult, Frame
+from ..drainage.hydraulics import MIN_DEPTH_M  # read-only: solver's own storage floor (frozen-core file,
+# not modified here) -- see _node_ground_floor() below, which mirrors GraphDrainage's own
+# `ground = max(node_ground, node_invert + MIN_DEPTH_M)` so derived fill/freeboard match the engine's HGL cap.
 from . import state
 from .png import grayscale_png_base64, depth_png_base64
 from .schemas import SimulateRequest, ReplayRequest, CompareRequest, RouteRequest
@@ -220,22 +223,53 @@ def _frame_max_cm(f: Frame) -> float:
     return _f(np.nanmax(f.depth) * 100.0) if f.depth.size else 0.0
 
 
+_BASELINE_BLOCKAGE_PROVENANCE = {
+    "tag": "SYNTHETIC", "source": "baseline (no blockage applied)",
+    "note": "Drainage assumed clear (0% blockage). FloodNet has no live drain-condition telemetry; this is "
+            "always an operator-set scenario assumption, never an observation."}
+
+
+def _blockage_provenance(res: SimulationResult) -> dict:
+    """Explicit, always-present blockage provenance for a run.
+
+    When a non-'none' blockage mode was applied, floodnet.drainage.scenarios.apply_blockage already writes a
+    correctly SYNTHETIC-tagged entry at res.provenance['network']['blockage'] -- this just also surfaces it at
+    the top level for easier frontend access (nested entry is left untouched).
+
+    When mode='none', api/state.py's apply_blockage short-circuits before ever calling
+    drainage.scenarios.apply_blockage (see state.py:268-270), so no blockage provenance is written anywhere in
+    that case. Rather than leave the key silently absent, construct an equally explicit baseline entry here
+    (main.py only -- state.py is not touched)."""
+    net_blockage = (res.provenance.get("network") or {}).get("blockage")
+    if net_blockage is not None:
+        return dict(net_blockage)
+    return dict(_BASELINE_BLOCKAGE_PROVENANCE)
+
+
 def summarize(res: SimulationResult) -> dict:
     frames = res.frames
+    frames_t_min = [f.t_s / 60.0 for f in frames]
     max_cm = [_frame_max_cm(f) for f in frames]
     surch = [int(np.sum(f.node_surcharging)) for f in frames]
     flooded = [_street_stats(f)[0] for f in frames]
     mb = res.mass_balance
+    peak_idx = max(range(len(max_cm)), key=lambda i: max_cm[i]) if max_cm else None
+    # New dict, not a mutation of res.provenance -- that dict object is shared across every cached copy of this
+    # run (state.py's _run_scenario_cached + copy.copy(cached)), so writing into it in place would leak across
+    # unrelated requests that happen to share the same (scenario_id, blockage, horizon) cache entry.
+    provenance = dict(res.provenance)
+    provenance["blockage"] = _blockage_provenance(res)
     return {"run_id": res.run_id, "scenario_id": res.scenario.id, "scenario_name": res.scenario.name,
-            "blockage": res.blockage, "frames_t_min": [f.t_s / 60.0 for f in frames],
+            "blockage": res.blockage, "frames_t_min": frames_t_min,
             "mass_balance": {k: _f(v) for k, v in vars(mb).items()},
             "runtime_s": _f(res.runtime_s), "n_frames": len(frames),
             "summary": {"max_depth_cm": max(max_cm) if max_cm else 0.0,
+                        "peak_depth_t_min": frames_t_min[peak_idx] if peak_idx is not None else None,
                         "peak_surcharging_nodes": max(surch) if surch else 0,
                         "peak_flooded_segments": max(flooded) if flooded else 0,
                         "total_surcharge_m3": _f(sum(float(f.node_surcharge_m3.sum()) for f in frames)),
                         "peak_rain_mm_h": _f(max((f.rain_mm_h for f in frames), default=0.0))},
-            "notes": list(res.notes), "provenance": res.provenance, "data_mode": state.data_mode()}
+            "notes": list(res.notes), "provenance": provenance, "data_mode": state.data_mode()}
 
 
 def _severity(cm: float) -> str:
@@ -286,13 +320,46 @@ def _run_max_depth_m(run_id: str) -> float:
     return max((float(np.nanmax(fr.depth)) for fr in res.frames), default=0.0)
 
 
+def _node_ground_floor(net) -> np.ndarray:
+    """Per-node storage ceiling, matching drainage.hydraulics.GraphDrainage's own
+    `ground = max(node_ground, node_invert + MIN_DEPTH_M)` (hydraulics.py:62) exactly, so fill_frac/freeboard_m
+    derived from the already-serialized node_hgl stay consistent with the solver's own HGL cap."""
+    return np.maximum(np.asarray(net.node_ground, dtype=np.float64),
+                       np.asarray(net.node_invert, dtype=np.float64) + MIN_DEPTH_M)
+
+
+def _node_fill_state(net, f: Frame, ground_floor: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-node derived fill fraction / freeboard / surcharging(fixed) / state, for one frame.
+
+    Bug fix (surcharging): node_surcharging reflects only the LAST 5 s solver sub-step of the 300 s frame
+    interval, while node_surcharge_m3 accumulates the WHOLE interval -- a node that surcharged earlier in the
+    interval but drained by the final sub-step reports surcharging=False despite surcharge_m3 > 0. Treat a
+    node as surcharging for display if either signal says so (Frame itself is not modified).
+
+    at_capacity uses the solver's own "full and blocking upstream flow" threshold (hydraulics.py:160,
+    `V >= vfull * 0.999`), reproduced here as fill_frac >= 0.999 since fill_frac is HGL-derived from the same
+    invert/ground geometry."""
+    invert = np.asarray(net.node_invert, dtype=np.float64)
+    span = np.maximum(ground_floor - invert, 1e-9)
+    fill_frac = np.clip((np.asarray(f.node_hgl, dtype=np.float64) - invert) / span, 0.0, 1.0)
+    freeboard_m = ground_floor - np.asarray(f.node_hgl, dtype=np.float64)
+    surcharging_fixed = np.asarray(f.node_surcharging, dtype=bool) | (np.asarray(f.node_surcharge_m3, dtype=np.float64) > 1e-9)
+    at_capacity = (~surcharging_fixed) & (fill_frac >= 0.999)
+    state_arr = np.where(surcharging_fixed, "surcharging", np.where(at_capacity, "at_capacity", "normal"))
+    return fill_frac, freeboard_m, surcharging_fixed, state_arr
+
+
 def serialize_frame(res: SimulationResult, k: int) -> dict:
     p = _pilot(); net = p["net"]; f = res.frames[k]
     lon, lat = state.xy_to_lonlat(net.node_x, net.node_y)
+    ground_floor = _node_ground_floor(net)
+    fill_frac, freeboard_m, surcharging_fixed, node_state = _node_fill_state(net, f, ground_floor)
     nodes = [{"id": str(net.node_id[n]), "lon": _f(lon[n]), "lat": _f(lat[n]), "hgl_m": _f(f.node_hgl[n]),
-              "surcharging": bool(f.node_surcharging[n]), "surcharge_m3": _f(f.node_surcharge_m3[n]),
-              "cause": str(f.node_cause[n])} for n in range(net.n_nodes)]
-    edges = [{"id": str(net.edge_id[e]), "util": _f(f.edge_util[e]), "flow_m3s": _f(f.edge_flow_m3s[e])}
+              "surcharging": bool(surcharging_fixed[n]), "surcharge_m3": _f(f.node_surcharge_m3[n]),
+              "cause": str(f.node_cause[n]), "fill_frac": _f(fill_frac[n]), "freeboard_m": _f(freeboard_m[n]),
+              "state": str(node_state[n])} for n in range(net.n_nodes)]
+    edges = [{"id": str(net.edge_id[e]), "util": _f(f.edge_util[e]), "flow_m3s": _f(f.edge_flow_m3s[e]),
+              "edge_capacity_m3s": _f(net.edge_capacity_m3s[e]), "blockage": _f(net.edge_blockage[e])}
              for e in range(net.n_edges)]
     run_max_m = _run_max_depth_m(res.run_id)
     png, vmax = depth_png_base64(f.depth, max_depth_m=run_max_m if run_max_m > 0 else None)
@@ -312,10 +379,15 @@ def _get_run_or_404(run_id: str) -> SimulationResult:
 
 
 async def _simulate(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
-    from ..rainfall.provider import LIVE_ID, ECMWF_ID, ProviderUnavailable
+    from ..rainfall.provider import LIVE_ID, ECMWF_ID, RADAR_ID, ProviderUnavailable
     p = _pilot()
-    if scenario_id not in (LIVE_ID, ECMWF_ID) and scenario_id not in p["scenarios"]:
-        raise HTTPException(404, f"unknown scenario_id {scenario_id!r}; available: {list(p['scenarios']) + [LIVE_ID, ECMWF_ID]}")
+    # RADAR_ID is admitted here on purpose even though it can never produce a run: the radar provider always
+    # raises ProviderUnavailable -> HTTP 503 with an explicit "ACCESS PENDING ..." reason. Excluding it would
+    # instead 404 as "unknown scenario_id", which reads as "no such thing" rather than the truth ("real
+    # integration boundary, deliberately not connected"). See docs/DECISIONS.md D-14.
+    if scenario_id not in (LIVE_ID, ECMWF_ID, RADAR_ID) and scenario_id not in p["scenarios"]:
+        raise HTTPException(404, f"unknown scenario_id {scenario_id!r}; "
+                                 f"available: {list(p['scenarios']) + [LIVE_ID, ECMWF_ID, RADAR_ID]}")
     try:
         return await run_in_threadpool(state.run_scenario, scenario_id, blockage, horizon_min)
     except state.ModuleMissing:
@@ -356,17 +428,56 @@ def frame(run_id: str, t_min: float):
     return serialize_frame(res, _frame_index(res, t_min))
 
 
+_CAUSE_KEYS = ("overcapacity", "downstream", "blockage")
+
+
 @app.get("/api/simulation/{run_id}/series")
 def series(run_id: str):
     res = _get_run_or_404(run_id)
     fr = res.frames
+    p = _pilot(); net = p["net"]
+    ground_floor = _node_ground_floor(net)
     seg_ids = sorted({sid for f in fr for sid in f.street_depth_m.keys()})
     streets = {sid: [round(_f(f.street_depth_m.get(sid, 0.0)) * 100.0, 1) for f in fr] for sid in seg_ids}
+
+    # Aggregate drainage-distress signals that already exist per-frame (edge_util, node_cause) but were
+    # previously invisible in this series -- e.g. edges can sit at/above full-bore capacity for many minutes
+    # before any node actually surcharges, which is exactly the lead time surcharging_count alone misses.
+    cause_counts: dict[str, list[int]] = {c: [] for c in _CAUSE_KEYS}
+    edges_at_capacity: list[int] = []
+    edges_near_capacity: list[int] = []  # descriptive only: "conduits at or above 80% of design flow" -- NOT a
+    # validated distress threshold the way node fill=0.999 is; never present this as a severity/danger line.
+    mean_edge_util: list[float] = []
+    max_edge_util: list[float] = []
+    nodes_at_capacity: list[int] = []
+    surcharging_count: list[int] = []
+    for f in fr:
+        cause_arr = np.asarray(f.node_cause)
+        for c in _CAUSE_KEYS:
+            cause_counts[c].append(int(np.sum(cause_arr == c)))
+        util = np.asarray(f.edge_util, dtype=np.float64)
+        edges_at_capacity.append(int(np.sum(util >= 0.999)))
+        edges_near_capacity.append(int(np.sum(util >= 0.8)))
+        mean_edge_util.append(_f(np.mean(util)) if util.size else 0.0)
+        max_edge_util.append(_f(np.max(util)) if util.size else 0.0)
+        fill_frac, _fb, surcharging_fixed, _st = _node_fill_state(net, f, ground_floor)
+        nodes_at_capacity.append(int(np.sum((~surcharging_fixed) & (fill_frac >= 0.999))))
+        surcharging_count.append(int(np.sum(surcharging_fixed)))
+
+    # surcharging_count uses the same interval-aware definition serialize_frame() reports per node
+    # (raw flag OR surcharge_m3 > 0), so the timeline and the map never disagree about the same frame.
+    # The raw last-sub-step flag is preserved separately as surcharging_count_instant rather than dropped:
+    # it is what the solver's node_surcharging array literally contains, and older validation figures
+    # (docs/VALIDATION.md) were computed from it.
     return {"run_id": run_id, "t_min": [f.t_s / 60.0 for f in fr], "rain_mm_h": [_f(f.rain_mm_h) for f in fr],
-            "surcharging_count": [int(np.sum(f.node_surcharging)) for f in fr],
+            "surcharging_count": surcharging_count,
+            "surcharging_count_instant": [int(np.sum(f.node_surcharging)) for f in fr],
             "flooded_segments": [_street_stats(f)[0] for f in fr],
             "max_depth_cm": [_frame_max_cm(f) for f in fr],
             "surcharge_m3": [_f(f.node_surcharge_m3.sum()) for f in fr],
+            "cause_counts": cause_counts, "edges_at_capacity": edges_at_capacity,
+            "edges_near_capacity": edges_near_capacity, "mean_edge_util": mean_edge_util,
+            "max_edge_util": max_edge_util, "nodes_at_capacity": nodes_at_capacity,
             "streets": streets, "provenance": res.provenance, "data_mode": state.data_mode()}
 
 
@@ -443,7 +554,14 @@ def explain(run_id: str, seg_id: str, t_min: Optional[float] = None):
     incident = (net.edge_us == node_idx) | (net.edge_ds == node_idx)
     utilization = _f(f.edge_util[incident].max()) if incident.any() else 0.0
     node_cause_raw = str(f.node_cause[node_idx])
-    surcharging = bool(f.node_surcharging[node_idx])
+    # Same interval-aware definition serialize_frame() and series() report (raw last-sub-step flag OR any
+    # volume spilled during the 300 s interval). Previously this endpoint used the raw flag alone, so a node
+    # that surcharged earlier in the interval but drained by the final sub-step showed as surcharging here
+    # while the map and timeline showed it as surcharging -- the same segment disagreeing with itself across
+    # panels. Measured undercount of the raw flag: +12 to +25 nodes per frame across 11 frames of a cloudburst
+    # run. See _node_fill_state()'s docstring for the underlying cause.
+    surcharging = (bool(f.node_surcharging[node_idx])
+                   or float(f.node_surcharge_m3[node_idx]) > 1e-9)
     if node_cause_raw in _DOMINANT_CAUSE_MAP:
         dominant_cause = _DOMINANT_CAUSE_MAP[node_cause_raw]
     elif depth_cm > 0:
@@ -475,6 +593,45 @@ def explain(run_id: str, seg_id: str, t_min: Optional[float] = None):
                            "terrain": terrain.provenance.to_dict()}}
 
 
+# ----------------------------------------------------------------------------- CAP alert draft
+@app.get("/api/simulation/{run_id}/alert")
+def alert_draft(run_id: str, format: str = "json"):  # noqa: A002 -- query param name is part of the contract
+    """Draft an OASIS CAP 1.2 message from a completed run, for review by an authorised alerting authority.
+
+    NOT an issued warning and NOT a dissemination endpoint. FloodNet is not a designated alerting authority:
+    it has no NDMA SACHET credential, no integration path into one, no subscriber list and no cell-broadcast
+    or SMS channel. This endpoint produces a *file* -- CAP `status = Draft`, which the specification itself
+    defines as "A preliminary template or draft, not actionable in its current form" -- that an authorised
+    officer can read, edit and, under their own authority, issue through their own system. See
+    floodnet/alerts/cap.py for the specification references and the field-by-field derivation.
+
+    `?format=xml` returns the CAP wire format (application/cap+xml) instead of the JSON envelope; the XML is
+    byte-identical to the `cap_xml` string in the JSON response.
+    """
+    res = _get_run_or_404(run_id)
+    if format not in ("json", "xml"):
+        raise HTTPException(422, f"format must be 'json' or 'xml', got {format!r}")
+    p = _pilot()
+    from ..alerts.cap import CAP_NS, build_cap_alert
+    try:
+        draft = build_cap_alert(res, p["net"], p.get("roads"), data_mode=state.data_mode())
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    xml = draft.to_xml()
+    if format == "xml":
+        return Response(content=xml, media_type="application/cap+xml",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="floodnet-cap-draft-{res.run_id}.xml"'})
+    provenance = dict(res.provenance)
+    provenance["blockage"] = _blockage_provenance(res)
+    return {"run_id": res.run_id, "cap_namespace": CAP_NS, "cap_version": "1.2",
+            "cap": draft.alert, "cap_xml": xml, "model_basis": draft.model_basis,
+            "issued": False, "message_class": "MODEL_FORECAST_DRAFT_NOT_ISSUED",
+            "disclaimer": draft.model_basis["disclaimer"],
+            "xml_url": f"/api/simulation/{res.run_id}/alert?format=xml",
+            "provenance": provenance, "data_mode": state.data_mode()}
+
+
 @app.get("/api/nowcast")
 def nowcast():
     res = state.latest_run()
@@ -504,18 +661,23 @@ async def compare(req: CompareRequest):
     blocked = await _simulate(req.scenario_id, spec, req.horizon_min)
 
     def side(res: SimulationResult) -> dict:
+        # summarize() already builds a full, correctly-blockage-tagged provenance dict for this run (including
+        # the explicit baseline entry when mode='none') -- reuse it here rather than re-deriving, so 'normal'
+        # and 'blocked' each carry their own honest provenance instead of both being described by the
+        # blocked-run's provenance (the previous top-level-only 'provenance' field did this).
         s = summarize(res)
         return {"run_id": res.run_id, "summary": s["summary"], "mass_balance": s["mass_balance"],
                 "max_depth_cm": [_frame_max_cm(f) for f in res.frames],
                 "surcharging_count": [int(np.sum(f.node_surcharging)) for f in res.frames],
-                "flooded_segments": [_street_stats(f)[0] for f in res.frames]}
+                "flooded_segments": [_street_stats(f)[0] for f in res.frames],
+                "provenance": s["provenance"]}
     n, b = side(normal), side(blocked)
     return {"scenario_id": req.scenario_id, "blockage": spec, "frames_t_min": [f.t_s / 60.0 for f in normal.frames],
             "normal": n, "blocked": b,
             "delta": {"max_depth_cm": b["summary"]["max_depth_cm"] - n["summary"]["max_depth_cm"],
                       "peak_flooded_segments": b["summary"]["peak_flooded_segments"] - n["summary"]["peak_flooded_segments"],
                       "peak_surcharging_nodes": b["summary"]["peak_surcharging_nodes"] - n["summary"]["peak_surcharging_nodes"]},
-            "provenance": blocked.provenance, "data_mode": state.data_mode()}
+            "provenance": b["provenance"], "data_mode": state.data_mode()}
 
 
 # ----------------------------------------------------------------------------- routing
@@ -537,6 +699,50 @@ async def route(req: RouteRequest):
     except (ValueError, KeyError) as e:
         raise HTTPException(422, str(e))
     out = dict(out or {})
+    out.update({"t_min": req.t_min, "run_id": res.run_id if res is not None else None, "vehicle": req.vehicle,
+                "depth_source": "simulation frame" if res is not None else "no run: dry network assumed",
+                "data_mode": state.data_mode()})
+    out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(),
+                                  "depths": res.provenance if res is not None else None})
+    return out
+
+
+@app.post("/api/route/alternatives")
+async def route_alternatives(req: RouteRequest):
+    """Additive sibling of POST /api/route: returns up to req.n_candidates genuinely diverse route
+    candidates, each scored under the safest / fastest(-by-distance) / balanced objectives (see
+    floodnet.routing.router.safe_routes_multi's docstring for exactly what each objective means -- "fastest"
+    is distance-only, there is no travel-time/speed model). Does not change POST /api/route's contract."""
+    p = _pilot(); roads_graph = p.get("roads")
+    if roads_graph is None:
+        raise state.ModuleMissing("roads not present in pilot bundle; routing impossible")
+    try:
+        from ..routing.router import safe_routes_multi, route_time_safety
+    except Exception as e:  # noqa: BLE001
+        raise state.ModuleMissing(f"floodnet.routing.router.safe_routes_multi unavailable (Agent F): {e}")
+    res: Optional[SimulationResult] = state.get_run(req.run_id) if req.run_id else state.latest_run()
+    if req.run_id and res is None:
+        raise HTTPException(404, f"run {req.run_id!r} not found")
+    depth = res.frames[_frame_index(res, req.t_min)].street_depth_m if res is not None else {}
+    try:
+        out: Any = await run_in_threadpool(safe_routes_multi, roads_graph, depth, tuple(req.origin),
+                                           tuple(req.dest), req.vehicle, None, None, req.n_candidates)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(422, str(e))
+    out = dict(out or {})
+
+    # Time-aware safety-through-T+X per candidate, only possible when a run (and therefore its full
+    # per-segment series) is actually available -- with no run, depth is a dry-network assumption with no
+    # time series behind it, so we honestly omit time_safety rather than fabricate one.
+    if res is not None:
+        limit = config.VEHICLE_LIMIT_CM.get(req.vehicle, 30)
+        t_min_series = [f.t_s / 60.0 for f in res.frames]
+        seg_ids_all = sorted({sid for f in res.frames for sid in f.street_depth_m.keys()})
+        streets_cm = {sid: [round(float(f.street_depth_m.get(sid, 0.0)) * 100.0, 1) for f in res.frames]
+                      for sid in seg_ids_all}
+        for cand in out.get("candidates", []):
+            cand["time_safety"] = route_time_safety(cand.get("route_segments", []), t_min_series, streets_cm, limit)
+
     out.update({"t_min": req.t_min, "run_id": res.run_id if res is not None else None, "vehicle": req.vehicle,
                 "depth_source": "simulation frame" if res is not None else "no run: dry network assumed",
                 "data_mode": state.data_mode()})

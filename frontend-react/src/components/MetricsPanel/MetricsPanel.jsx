@@ -82,9 +82,9 @@ export default function MetricsPanel() {
   }, [series, currentT])
 
   return (
-    <section className={styles.section}>
+    <section className={styles.section} aria-labelledby="metrics-panel-heading">
       <div className="panel-heading">
-        Hydrodynamic metrics
+        <span id="metrics-panel-heading">Hydrodynamic metrics</span>
         {hasData && <span className={styles.tMin}>Frame: T+{currentT} min</span>}
       </div>
 
@@ -106,7 +106,11 @@ export default function MetricsPanel() {
               <span className={styles.frameLabel}>Frame snapshot</span>
             </div>
 
-            <div className={styles.dominantValueRow}>
+            {/* Polite live region: these values change when the operator scrubs the timeline, which is
+                not a change the screen-reader user would otherwise be told about. Scoped to the headline
+                depth + severity + rate only -- the secondary row and peak box are deliberately NOT live
+                so scrubbing does not flood the announcement queue. */}
+            <div className={styles.dominantValueRow} role="status" aria-atomic="true">
               <div>
                 <div
                   className={styles.dominantValue}
