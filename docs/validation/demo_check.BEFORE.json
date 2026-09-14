@@ -18,7 +18,7 @@
    "peak_flooded_segments_15cm": 184,
    "max_cell_depth_m": 0.8567260503768921,
    "peak_edge_util": 1.0,
-   "runtime_s": 7.2142860889434814
+   "runtime_s": 8.688228368759155
   },
   "heavy": {
    "scenario": "heavy",
@@ -37,7 +37,7 @@
    "peak_flooded_segments_15cm": 707,
    "max_cell_depth_m": 1.8514010906219482,
    "peak_edge_util": 1.0,
-   "runtime_s": 9.386895656585693
+   "runtime_s": 10.67845368385315
   },
   "cloudburst": {
    "scenario": "cloudburst",
@@ -56,7 +56,7 @@
    "peak_flooded_segments_15cm": 933,
    "max_cell_depth_m": 1.9160659313201904,
    "peak_edge_util": 1.0,
-   "runtime_s": 8.840508699417114
+   "runtime_s": 10.133027791976929
   },
   "july2005": {
    "scenario": "july2005",
@@ -75,7 +75,7 @@
    "peak_flooded_segments_15cm": 1271,
    "max_cell_depth_m": 2.3309261798858643,
    "peak_edge_util": 1.0,
-   "runtime_s": 15.241126537322998
+   "runtime_s": 13.924067258834839
   },
   "heavy_blocked70": {
    "scenario": "heavy",
@@ -95,9 +95,9 @@
    "peak_flooded_segments_15cm": 767,
    "max_cell_depth_m": 1.8586598634719849,
    "peak_edge_util": 1.0,
-   "runtime_s": 11.252328872680664
+   "runtime_s": 10.685070276260376
   },
-  "routing_probe_note": "wet_correctly_unreachable",
+  "routing_probe_note": "unexpected",
   "routing_probe": {
    "deepest_segment": "102171414_0",
    "name": "Hindmata Flyover",
@@ -110,10 +110,10 @@
     72.8477608,
     19.0091018
    ],
-   "dry_length_m": 3919.0033640458105,
+   "dry_length_m": null,
    "wet_length_m": null,
    "wet_reachable": false,
-   "avoided": 9,
+   "avoided": 0,
    "max_depth_on_wet_route_cm": null
   }
  },
@@ -129,11 +129,11 @@
   "blocked_more_surface_water": true,
   "blocked_less_outfall": true,
   "blocked_more_flooded_segments": true,
-  "route_avoids_flooded_segments": true,
+  "route_avoids_flooded_segments": false,
   "api_meta_ok": true,
   "frontend_loads": true,
   "api_simulate_ok": true,
   "api_route_ok": true
  },
- "all_passed": true
+ "all_passed": false
 }

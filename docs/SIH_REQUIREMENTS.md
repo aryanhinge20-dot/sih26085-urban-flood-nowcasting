@@ -347,10 +347,56 @@ known modelling simplification is documented rather than hidden — see `docs/VA
 | SR-11 depth in cm | **COMPLETE** | Metres internally, cm only at the API/UI boundary (`api/main.py::serialize_frame`, `streets_geojson`). |
 | SR-12 dynamic GIS dashboard | **COMPLETE** | Production frontend is `frontend-react/` (React + Vite + Leaflet) — map, 0–180 min timeline, alerts, why-flooded causal chain, flood-safe routing, layer controls, and a provenance panel, all driven live by the real backend API (no mock/random data). Superseded the earlier vanilla-JS dashboard and the "React migration out of scope" note above, both stale as of 2026-09-09. The operational dashboard (`ProvenancePanel.jsx`, `ScenarioPanel.jsx`) was always honest and matches backend provenance tags exactly. A separate audit (2026-09-10) found the new marketing landing page (`LandingPage.jsx`, added this pass, not yet part of the dashboard proper) contained several overclaiming statements — a false "never synthetic" claim, a false MCGM calibration badge, an overclaimed ECMWF/IMD description, an unsourced "944mm" rainfall figure, and a coordinate/elevation pair outside the actual simulated pilot bounding box. These have been corrected in this same pass to match documented reality; see the git diff on `LandingPage.jsx`. |
 | SR-13 real-time / instant | **PARTIAL** | Re-profiled 2026-09-09 (`heavy` scenario, 70% uniform blockage, full 180-min horizon, real pilot grid, cProfile): a fresh full-pilot 3h run takes **114-148s** wall-clock (cold ~148s, subsequent fresh runs ~114-129s; no run-to-run caching, matching production `_run_physics`). cProfile shows 68% of runtime in `terrain/surface.py`'s adaptive sub-stepping (`_substep`, 3905 calls) and ~20% in `drainage/hydraulics.py::step` (2160 calls) — both genuine numerical cost inside the frozen physics core, not implementation waste (runoff/street-aggregation/serialization/snapshot together are <2s, under 2% of total). Not sub-second, but within a live-demo budget; identical repeat requests and all read-only endpoints (frame/series/route/status/explain) are sub-second via existing caching. No claim of true real-time streaming ingestion is made. Further speedup would require touching the frozen solver (vectorization/JIT of the substep loop) — not attempted this pass; see the product-hardening report for the full profiling breakdown. |
-| SR-14 flood-safe routing API | **COMPLETE** | `POST /api/route`; regression tests prove the route changes because of predicted flooding (`tests/test_routing_router.py::test_flooded_middle_segment_forces_detour`, `::test_blocked_destination_unreachable`); routing graph construction now cached per pilot rather than rebuilt per call. |
+| SR-14 flood-safe routing API | **COMPLETE**, real-network connectivity caveat documented (fixed 2026-09-14, see below) | `POST /api/route`; regression tests prove the mechanism changes routes because of predicted flooding (`tests/test_routing_router.py::test_flooded_middle_segment_forces_detour`, `::test_blocked_destination_unreachable`) on a synthetic 5x5 fixture, and — as of this fix — on the **real pilot network**: `backend/scripts/routing_fix_validation.py` proves, with one real "heavy" simulation and 4 real origin/destination pairs, that (a) the baseline graph routes real in-bbox points, (b) real simulation-derived flood depth genuinely alters routes (longer paths, real avoided segments) or genuinely blocks them, (c) returned geometry is a valid `LineString`, (d) engineered and storm-caused unreachability are both honestly reported (`reachable: false`, `route: null`), not papered over. `docs/validation/demo_check.json`, re-run 2026-09-14 at the same 60-min horizon as before the fix, now reports `"route_avoids_flooded_segments": true` and `"all_passed": true"` (16/16), versus `false`/`false` beforehand (`docs/validation/demo_check.BEFORE.json`, kept as before/after evidence). **Root cause:** `_snap()` picked the literal nearest node regardless of network role, and could land on one of 551 dangling one-edge stub nodes (24% of pilot nodes — driveways/cul-de-sac ends) sitting in a small strongly-connected pocket with no directed path back to the network's main core. **Fix:** `_snap()` restricted to the graph's largest strongly-connected component (2,123/2,321 nodes, 91.5%) — standard OSRM/GraphHopper/Valhalla practice; two nodes in the same SCC are mutually reachable by definition. No edge was added, no road invented, no OSM/MCGM geometry altered — only which existing node a lon/lat binds to. **Documented residual limitation, not fixable without altering real geometry:** the remaining 8.5% of nodes (198) sit outside the routable core and can never be an exact snap target; a point very near one binds to the nearest *core* node instead, which can be farther away. Full evidence: `docs/VALIDATION.md` §2.I "FIXED" note, `docs/validation/routing_topology.json`, `docs/validation/routing_fix_validation.json`. |
 
-SR-15/SR-16 are about audience differentiation and city applicability, not a backend component; unchanged
+SR-15 (audience differentiation) inherits SR-14's status above — the same real-network connectivity fix
+applies to every caller regardless of vehicle class; `routing_fix_validation.py` exercises car and truck,
+the existing fixture suite separately covers ambulance. SR-16 (city applicability) is unchanged, COMPLETE,
 from `docs/DECISIONS.md` D-01 (Mumbai, locked).
+
+## 6. 2026-09-14 full-system audit — corrections to this document
+
+A full-system audit (system code review + 2 independent research agents on comparable real systems and
+government/CAP workflow + 1 independent fresh-context SIH judge review) was run against current code and
+runtime artefacts, per the standing "current code + actual data + official sources are the source of truth"
+instruction. Changes made to this document as a direct result:
+
+- **SR-14/SR-15 downgraded from COMPLETE to PARTIAL** (above) — the routing *mechanism* is real and unit-tested,
+  but `docs/validation/demo_check.json` (an actual prior run, not newly fabricated) proves the real pilot road
+  graph can fail to connect two genuine in-bbox points even before any flood weighting is applied. This was
+  independently corroborated by a fresh-context judge agent that traced the same `api/main.py`/`router.py`
+  wiring without being told about this finding.
+- **No other SR status changed.** SR-01/02/03/04/05/06/07/08/09/10/11/12/13/16 were spot-checked against
+  current code this pass and their existing statuses in §5 still hold.
+- A prior audit pass (documented in `docs/VALIDATION.md` §2.F/G/§8) had reported a fabricated spatial
+  significance-test result for the MCGM Flooding Spots comparison; this was caught and retracted before this
+  document was touched, and is noted here only because it is a directly relevant precedent for why every claim
+  in this section was re-verified against actual code/data rather than trusted from a prior report.
+- **2026-09-14, same-day follow-up: SR-14/SR-15 upgraded back to COMPLETE.** The routing connectivity gap
+  identified above was root-caused (`_snap()` could land on a dangling one-edge stub node stranded from the
+  main network by real one-way topology) and fixed (`_snap()` restricted to the graph's largest strongly
+  connected component — no geometry altered, no edges invented). Validated on 4 real origin/destination pairs
+  and a full `demo_check.py` re-run (`all_passed` false → true). Full evidence in `docs/VALIDATION.md` §2.I.
+
+## 7. 2026-09-14 FINAL VALIDATION PASS — confirmation, no status changes
+
+Run after the §6 routing fix, as a final freeze-review gate: `pytest` **169 passed, 4 skipped, 0 failed**
+(up from 136 at the 2026-09-09 snapshot — growth reflects this session's accumulated work, not new failures);
+`npm run build` clean (62 modules); `npm run lint` 0 errors (6 pre-existing warnings). All 15 required
+functional checks (synthetic/ECMWF/historical-replay forecasts, 0–180min timeline, drainage forecast,
+surcharge/backflow, street depth, Why Flooded, A/B search, multi-candidate routing, flood-aware routing on the
+**real** pilot network, stale-state handling, provider/scenario switching, all production routes) verified live
+against a freshly-started backend with real pilot data, no mocks. A UI sweep for fabricated numbers, fake
+radar/traffic/blockage claims, and unsupported AI claims found **none**. Browser QA remains unavailable for a
+precise, evidenced reason (sandbox/browser network isolation — see `docs/VALIDATION.md` §9), not a blanket
+absence of tooling. **No SR status changed as a result of this pass** — it confirms, rather than revises, the
+§5/§6 statuses above. Full detail: `docs/VALIDATION.md` §9.
+
+**Final status summary, all 16 SRs:** COMPLETE — SR-02, SR-03 (w/ caveat), SR-04, SR-05 (w/ scientific
+limitation), SR-06, SR-07 (cross-checked), SR-08, SR-09, SR-10, SR-11, SR-12 (backend delivery; browser QA
+outstanding), SR-14, SR-15, SR-16. PARTIAL — SR-01 (rainfall spatially uniform by architecture, no radar),
+SR-13 (83.95s–150s per full run, not sub-second/real-time-streaming). **Nothing MISSING, nothing newly
+BLOCKED** beyond the pre-existing, evidenced radar/IMD-credential blocks already recorded in SR-01's evidence.
 
 ## Related documents
 

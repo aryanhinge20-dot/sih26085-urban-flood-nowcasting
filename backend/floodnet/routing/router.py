@@ -6,6 +6,20 @@ A flood-agnostic `baseline` route is always computed for comparison.
 safe_route() is the original single-route entry point (POST /api/route), unchanged. safe_routes_multi() and
 route_time_safety() below are additive: multi-candidate (safest/fastest-by-distance/balanced) routing and
 time-aware safety-through-T+X evaluation, for POST /api/route/alternatives.
+
+ROUTING-CORE RESTRICTION (2026-09-14, P0 fix): `_snap()` used to pick the literal nearest node in the whole
+RoadGraph, including ~24% of pilot nodes that are dangling one-edge stubs (driveways/service-road cul-de-sacs).
+On the real MCGM/OSM pilot network this let an origin/destination snap onto a node whose only edge, combined
+with real OSM `oneway` tagging, puts it in a small strongly-connected component (SCC) with no directed path
+back into the main network -- proven empirically: `docs/validation/demo_check.json`'s routing_probe returned
+`NetworkXNoPath` even for the *unweighted baseline* route (no flood logic involved). Root cause + evidence:
+`docs/validation/routing_topology.json` (`backend/scripts/routing_topology_diagnostic.py`). Fix: `_snap()` now
+only offers nodes in the graph's largest SCC (the "routable core") as candidates. Two nodes in the same SCC
+are mutually reachable by definition, so this *guarantees* a baseline route exists between any two snapped
+points -- without adding a single edge, inventing any road, or altering any OSM/MCGM geometry; it only changes
+which existing node a given lon/lat binds to. This is the same practice OSRM/GraphHopper/Valhalla use for
+exactly this reason. A destination can still become genuinely unreachable once flood weighting removes edges
+(`reachable: False` is the correct, honest outcome then, not a bug).
 """
 from __future__ import annotations
 
@@ -18,7 +32,7 @@ from ..config import CRS_COMPUTE, CRS_GEO, VEHICLE_LIMIT_CM
 DEFAULT_PENALTY_PER_CM = 0.1
 
 _graph_cache: dict[int, nx.DiGraph] = {}
-_tree_cache: dict[int, tuple] = {}   # id(roads) -> (pyproj Transformer, scipy cKDTree)
+_tree_cache: dict[int, tuple] = {}   # id(roads) -> (pyproj Transformer, scipy cKDTree, core node-index array)
 
 
 def clear_caches() -> None:
@@ -53,25 +67,39 @@ def _cached_graph(roads: RoadGraph) -> nx.DiGraph:
     return G
 
 
+def _routable_core(roads: RoadGraph) -> np.ndarray:
+    """Node indices in the directed graph's largest strongly connected component -- the subset of nodes
+    guaranteed mutually reachable from one another. See the routing-core-restriction note at the top of this
+    module for why snapping is restricted to this set rather than to the literal nearest node."""
+    G = _cached_graph(roads)
+    comps = list(nx.strongly_connected_components(G))
+    if not comps:
+        return np.arange(len(roads.node_xy))
+    return np.array(sorted(max(comps, key=len)), dtype=int)
+
+
 def _cached_tree(roads: RoadGraph):
     from pyproj import Transformer
     from scipy.spatial import cKDTree
     key = id(roads)
     t = _tree_cache.get(key)
     if t is None:
+        core = _routable_core(roads)
         fwd = Transformer.from_crs(CRS_GEO, CRS_COMPUTE, always_xy=True)
-        tree = cKDTree(np.asarray(roads.node_xy, dtype=float))
-        t = (fwd, tree)
+        tree = cKDTree(np.asarray(roads.node_xy, dtype=float)[core])
+        t = (fwd, tree, core)
         _tree_cache[key] = t
     return t
 
 
 def _snap(roads: RoadGraph, lonlat_points: list[tuple[float, float]]) -> list[int]:
-    fwd, tree = _cached_tree(roads)
+    """Snaps each lonlat point to the nearest node in the routable core (see _routable_core) -- never to a
+    node outside it, even if a literally-closer node exists just outside the core (e.g. a driveway stub)."""
+    fwd, tree, core = _cached_tree(roads)
     pts = np.asarray(lonlat_points, dtype=float)
     x, y = fwd.transform(pts[:, 0], pts[:, 1])
     _, idx = tree.query(np.column_stack([x, y]))
-    return [int(i) for i in np.atleast_1d(idx)]
+    return [int(core[i]) for i in np.atleast_1d(idx)]
 
 
 def _path_geometry(roads: RoadGraph, G: nx.DiGraph, path: list[int]) -> tuple[dict, float, list[str]]:

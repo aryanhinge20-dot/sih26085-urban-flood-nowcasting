@@ -18,6 +18,75 @@ session, evidence quoted) · `PARTIAL` (works with a stated real gap) · `BLOCKE
 
 ---
 
+## 0. 2026-09-14 full-system audit — what changed since this document was written
+
+This document's body (below) was written 2026-09-10 and is otherwise still accurate — re-verified spot-checks
+this pass did not contradict it. A full-system audit on 2026-09-14 (code re-verification + 2 independent
+research agents on comparable real systems and government/CAP integration + 1 fresh-context independent SIH
+judge review, none of which were told to trust prior reports) found the following **new** items, each detailed
+in full in `docs/VALIDATION.md` and `docs/SIH_REQUIREMENTS.md` §6 rather than duplicated here:
+
+- **Routing real-network connectivity gap (new finding).** `docs/validation/demo_check.json` (an actual prior
+  run already on disk) shows the pilot road graph's own **unweighted baseline route** can fail
+  (`NetworkXNoPath`) for a genuine in-bbox point pair — before any flood logic runs. This is a road-graph
+  connectivity gap, not (as an earlier reading of the same file concluded) an effect of storm severity. Traces
+  to `research/mumbai/BASEMAP.md:99`, an unperformed validation flagged at project start and never closed. SR-14
+  and SR-15 in `docs/SIH_REQUIREMENTS.md` were downgraded from COMPLETE to PARTIAL as a direct result. Top
+  priority open item — see that file §6 for the fix plan.
+- **A fabricated statistic was found in `docs/VALIDATION.md` and corrected.** An earlier audit pass had
+  reported a "spatial permutation test" (specific seed, draw count, p-values) for the MCGM Flooding Spots
+  comparison that was never implemented in code (`grep -rIl "permutation"` matched only the markdown file
+  itself). This was caught, and is now visibly retracted in `docs/VALIDATION.md` §2.F/G and §8 (an erratum, not
+  a silent edit) — status reverted from a false "no spatial skill" conclusion to honest "NOT MEASURED." A real
+  implementation of this test is scoped and buildable but not yet done (compute-heavy; paused this session for
+  memory-safety reasons — see below).
+- **Independent SIH judge review completed** (fresh subagent context, code-only, no prior-report trust). Scored
+  the project 6/10 Innovation, 8/10 Technical Complexity, 4/10 Feasibility/Scalability, 6/10 Presentation/UX,
+  4/10 Impact, 6/10 Problem-Solution Fit — and independently corroborated the routing finding above, the
+  zero-validated-accuracy status, and that no AI/ML runs in the live path (physics/graph algorithms only).
+  Verdict: "a more honest prototype than most SIH submissions... but honesty about limitations is not the same
+  as having overcome them."
+- **Competitive research completed** (12 comparable real systems: Google Flood Hub, JBA, Chennai CFM-DSS, CWC,
+  iFLOWS-Mumbai, NOAA FIM, UK Met Office Nimrod/pysteps, Waze+FloodMapp, academic dual-drainage studies,
+  MIKE+/InfoWorks ICM, Aurassure). Conclusion: surface-drainage coupling itself is not novel (mature in
+  commercial tools, already applied to Mumbai once by TERI/MIKE21); FloodNet's real, narrow, evidence-backed
+  differentiators are (a) doing that coupling openly on independently-verified real municipal data, live
+  per-request, (b) time-aware multi-objective vehicle-class routing (no comparable granularity found anywhere
+  researched), and (c) per-field data provenance surfaced to end users (nothing else researched exposes this).
+- **Government/CAP integration research completed.** No public SACHET submission path exists (re-confirmed).
+  Mumbai's DDMA is chaired by BMC's own Additional Municipal Commissioner — BMC *is* the flood authority for
+  Mumbai. BMC's real operating floor is phone/radio/text (1916 helpline had a 6+ hour outage in the current
+  2026 monsoon, fell back to ham radio), not CAP/XML ingestion — motivating a `[PROPOSED]` (not yet built,
+  not an SIH requirement) plain-language incident-brief export reusing existing `cap.py` fields.
+- **Unexplained-looking local secret flagged.** The local (gitignored, untracked) `.env` contains an
+  `INDIAN_API_KEY` value formatted like a live credential, referenced nowhere in `.env.example` or the
+  codebase. Not a repo/leak risk, but unexplained — verify and rotate/remove if genuine.
+- **Session resource constraint — resolved.** Host machine free memory dropped to ~1GB of 15.78GB earlier in
+  this session (the backend was OOM-killed once), which paused `pytest`/`npm run build`/backend restarts.
+  Memory later recovered to ~4.5–5.5GB free and stayed stable; once confirmed, the held-back work was
+  completed: the **P0 routing connectivity fix** (below) and a **final validation pass** — `pytest` **169
+  passed, 4 skipped, 0 failed**, `npm run build` clean, `npm run lint` 0 errors, a fresh full 180-min
+  simulation run (83.95s, mass-balance error −3.77e-12%), and live verification of all 15 required functional
+  checks against a freshly-started backend. Full detail: `docs/VALIDATION.md` §9,
+  `docs/SIH_REQUIREMENTS.md` §7.
+- **P0 routing connectivity bug — found and fixed.** `docs/validation/demo_check.json` proved the real pilot
+  road graph's own unweighted baseline route could fail (`NetworkXNoPath`) for a genuine in-bbox point pair.
+  Root cause: `router.py`'s `_snap()` picked the literal nearest node regardless of its role in the network,
+  landing on one of 551 dangling one-edge stub nodes (24% of pilot nodes) stranded in a small
+  strongly-connected pocket with no directed path back to the main 2,123-node core. Fixed by restricting
+  `_snap()` to the graph's largest strongly connected component (91.5% of nodes) — the same practice
+  OSRM/GraphHopper/Valhalla use; no geometry altered, no edges invented. Validated on 4 real origin/destination
+  pairs plus a full `demo_check.py` re-run (`all_passed` false→true) plus live API re-confirmation. SR-14/SR-15
+  are **COMPLETE** again, with the residual 8.5%-of-nodes limitation honestly documented. Full detail:
+  `docs/VALIDATION.md` §2.I, `docs/SIH_REQUIREMENTS.md` §6.
+- **Browser QA: still unavailable, now with a precise diagnosis.** Confirmed this session (not just asserted):
+  browser tooling itself works (loaded an external site successfully), but it cannot reach a backend started
+  via the Bash-tool sandbox — Chrome's own network stack recorded a genuine 404 from something else at that
+  address while the sandbox's `curl` got 200 from the identical URL. This is sandbox/browser network
+  isolation, not an application defect. A human must still click through before the demo.
+
+---
+
 ## 1. What FloodNet does
 
 ```
@@ -325,13 +394,14 @@ a cold one on an unchanged binary). Not real-time; **no claim of real-time compu
 
 | Check | Result |
 |---|---|
-| `pytest backend/tests` | **136 passed, 4 skipped** (was 126/4 at session start; +10 routing tests) |
+| `pytest backend/tests` | **136 passed, 4 skipped** (was 126/4 at session start; +10 routing tests). **Re-run 2026-09-14 (final pass): 169 passed, 4 skipped, 0 failed** — further growth from this session's routing-fix work, still zero failures |
 | The 4 skips | Intentional live-service opt-outs, verified via `pytest -rs` — gated on `IMD_API_KEY` / `RUN_LIVE_ECMWF_TEST` |
-| `npm run build` | Clean, **62 modules** |
-| `npm run lint` | **0 errors**, 7 warnings — all pre-existing, none introduced across 21 modified files |
-| `/static/`, `/static/dashboard` | **200** (SPA fallback) — runtime-verified against a live server |
+| `npm run build` | Clean, **62 modules**. Re-confirmed clean 2026-09-14 |
+| `npm run lint` | **0 errors**, 7 warnings — all pre-existing, none introduced across 21 modified files. Re-confirmed 2026-09-14: 0 errors, 6 warnings |
+| `/static/`, `/static/dashboard` | **200** (SPA fallback) — runtime-verified against a live server, twice (2026-09-10 and 2026-09-14) |
 | `/openapi.json`, `/docs`, `/api/health` | **200** |
 | Missing static asset | **404** (correctly not swallowed) |
+| `POST /api/route`, `/api/route/alternatives` on real pilot data | **200**, live-verified 2026-09-14 post routing-fix — real flood-aware detours confirmed (see §9 note above) |
 
 **Operational warning for demo day:** a stale backend process was found serving old code without
 `/api/route/alternatives` registered. **Restart the backend before demoing** —
