@@ -452,7 +452,9 @@ def _fmt(v, nd=1):
 def render_markdown(report: dict) -> str:
     L = ["# Flooding Spots validation (MCGM layer 344) — pilot " + config.PILOT_NAME, "",
          f"Generated {report['generated']} on commit {report.get('commit', '?')}; horizon {report['horizon_min']} min; "
-         "blockage none. Measurement only — the model was not tuned for this check.", "",
+         f"blockage none; surface boundary "
+         f"{'OPEN (open_boundary=True, matches the shipped API)' if report.get('open_boundary', True) else 'CLOSED (does NOT match the shipped API)'}"
+         ". Measurement only — the model was not tuned for this check.", "",
          "## What this is and is not", "",
          "* MCGM \"Flooding Spots\" is a chronic, **undated** inventory (~2017); it is not a flood map for any storm. "
          "Only spots not flagged `(Delete)`/`(Tackled)` are scored (**active**); inactive ones are listed for reference.",
@@ -546,13 +548,22 @@ def diagnose(s: dict) -> str:
 
 
 def build_report(pilot: dict, scenarios=("heavy", "july2005"), horizon_min: int = 180, chitale_scenario: str = "july2005",
-                 progress=print) -> dict:
+                 progress=print, open_boundary: bool = True, n_perm: int = PERM_N, seed: int = PERM_SEED) -> dict:
     runs = []; chit = None
     for sid in scenarios:
         t0 = time.time()
-        res = run_pilot_scenario(pilot, sid, horizon_min)
-        progress(f"[spots] {sid}: engine {res.runtime_s:.1f}s wall {time.time()-t0:.1f}s, mb err {res.mass_balance.error_pct:.2f}%")
-        runs.append(evaluate_spots(pilot, res))
+        res = run_pilot_scenario(pilot, sid, horizon_min, open_boundary=open_boundary)
+        progress(f"[spots] {sid}: engine {res.runtime_s:.1f}s wall {time.time()-t0:.1f}s, mb err {res.mass_balance.error_pct:.2f}%, "
+                 f"boundary_out {res.mass_balance.boundary_out_m3:.1f} m3 (open_boundary={open_boundary})")
+        run = evaluate_spots(pilot, res)
+        if n_perm > 0:
+            t1 = time.time()
+            run["permutation"] = permutation_test(pilot, res, n_perm=n_perm, seed=seed)
+            pd = run["permutation"]["detected"]
+            progress(f"[perm]  {sid}: observed {pd['observed']}/{run['permutation']['n_active_spots']} DETECTED, "
+                     f"null mean {pd['null_mean']:.2f} +/- {pd['null_sd']:.2f}, p = {pd['p_value']:.4f} "
+                     f"({time.time()-t1:.1f}s)")
+        runs.append(run)
         if sid == chitale_scenario:
             seg_max = {}
             for f in res.frames:
@@ -569,27 +580,45 @@ def build_report(pilot: dict, scenarios=("heavy", "july2005"), horizon_min: int 
     except Exception:  # noqa: BLE001
         pass
     return {"generated": time.strftime("%Y-%m-%d %H:%M"), "commit": commit, "horizon_min": horizon_min,
-            "pilot": config.PILOT_NAME, "runs": runs, "chitale": chit}
+            "pilot": config.PILOT_NAME, "open_boundary": bool(open_boundary), "runs": runs, "chitale": chit}
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--scenarios", nargs="+", default=["heavy", "july2005"])
     ap.add_argument("--horizon-min", type=int, default=180)
+    ap.add_argument("--permutations", type=int, default=PERM_N,
+                    help="spatial permutation test iterations (0 disables it)")
+    ap.add_argument("--perm-seed", type=int, default=PERM_SEED)
+    ap.add_argument("--closed-boundary", action="store_true",
+                    help="reproduce the pre-2026-09-10 runs (closed boundary; does NOT match the shipped API)")
     ap.add_argument("--out-json", default=str(config.REPO_DIR / "docs" / "validation" / "flooding_spots.json"))
     ap.add_argument("--out-md", default=str(config.REPO_DIR / "docs" / "validation" / "FLOODING_SPOTS.md"))
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     from ..data.load import load_pilot
     pilot = load_pilot()
-    rep = build_report(pilot, a.scenarios, a.horizon_min)
+    rep = build_report(pilot, a.scenarios, a.horizon_min, open_boundary=not a.closed_boundary,
+                       n_perm=a.permutations, seed=a.perm_seed)
+    md = render_markdown(rep)
+    perms = [r["permutation"] for r in rep["runs"] if r.get("permutation")]
+    if perms:
+        md += "\n" + render_permutation_markdown(perms)
     Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
     with open(a.out_json, "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=1)
     with open(a.out_md, "w", encoding="utf-8") as fh:
-        fh.write(render_markdown(rep))
+        fh.write(md)
     for run in rep["runs"]:
-        print(f"{run['scenario']}: active {run['active_counts']} base-rate>=15cm {run['base_rate']['frac_cells_ge_threshold_envelope']*100:.1f}%")
+        line = (f"{run['scenario']}: active {run['active_counts']} "
+                f"base-rate>=15cm {run['base_rate']['frac_cells_ge_threshold_envelope']*100:.1f}%")
+        p = run.get("permutation")
+        if p:
+            line += (f" | permutation: observed {p['detected']['observed']}/{p['n_active_spots']} vs null mean "
+                     f"{p['detected']['null_mean']:.2f}, p={p['detected']['p_value']:.4f}"
+                     f" | sum-depth {p['sum_max_depth_cm']['observed']:.1f} cm vs null "
+                     f"{p['sum_max_depth_cm']['null_mean']:.1f}, p={p['sum_max_depth_cm']['p_value']:.4f}")
+        print(line)
     print(f"wrote {a.out_md} and {a.out_json}")
     return 0
 

@@ -86,9 +86,44 @@ error_pct_identical          : true      (-2.301676369524409e-12 both runs)
 
 The model is bit-for-bit reproducible. No stochastic component.
 
-**A4 — Solver stability / independent hydraulic engine.** EPA SWMM 5 (pyswmm 2.1.0) DYNWAVE run on the same
-exported network reports **flow-routing continuity error 0.0000 %**, confirming the exported `.inp` is
-hydraulically well-posed (no negative slopes, no disconnected junctions, no invalid geometry).
+**A4 — Solver stability / independent hydraulic engine. ⚠ PRIOR FIGURE CORRECTED; SEE THE NON-CONVERGENCE
+DISCLOSURE.** EPA SWMM 5 (pyswmm 2.1.0) DYNWAVE runs on the exported network. The previous version of this
+document reported "flow-routing continuity error **0.0000 %**" in three places. **That 0.0000 % was a
+reporting artifact, not a measurement.** `floodnet/validation/swmm_compare.py:119` reads
+`sim.flow_routing_error` *inside* the `with Simulation(...) as sim:` block, i.e. before SWMM's
+`swmm_end()` has computed the mass-balance summary. Verified directly against pyswmm 2.1.0 / SWMM 5.2.4 on
+the committed `heavy_direct.inp`:
+
+```
+inside the with-block, before swmm_end()   ->  0.0                     <- what swmm_compare.py:119 reads
+inside the with-block, after  swmm_end()   -> -0.006075585726648569
+after Simulation.execute() (already closed) ->  0.0
+```
+
+The attribute is simply not populated at the point the code samples it, so the reported value was `0.0`
+regardless of what the solver did. The real figures are in the committed SWMM report files, which SWMM
+itself wrote:
+
+| Run | File | Flow-routing continuity error | Runoff continuity error | % of steps **not converging** | Avg iterations/step |
+|---|---|---|---|---|---|
+| `heavy_direct` (**the run used for the §1.C comparison**; same-inflow mode) | `data/processed/pilot/swmm/heavy_direct.rpt` | **−0.008 %** | 0.000 % (no subcatchments) | **68.77 %** | 6.22 |
+| `heavy` (standalone reference; SWMM's own subcatchment runoff) | `data/processed/pilot/swmm/heavy.rpt` | **−0.009 %** | **−0.370 %** | **66.46 %** | 6.09 |
+
+A −0.008 % routing continuity error is still an excellent, entirely normal SWMM result — the correction is to
+the *precision claimed*, not to the conclusion that the exported `.inp` is well-posed.
+
+**The non-convergence is the material finding, and it was not disclosed before.** In the comparison run SWMM
+failed to converge within its 8-iteration limit on **68.77 % of routing steps**; five named junctions
+(`2171039205`, `2171039208`, `2171039210`, `2171039211`, `2172030502`) are non-converging that often each, the
+worst link flow-instability index is the maximum value of 100 (`Link 18098`), one node carries a 1.39 %
+continuity error on its own, the adaptive time step collapses from the nominal 5 s to an average of 0.53 s
+(minimum 0.01 s), and a single link (`2173048204_COLLECT`) is the time-step-critical element for 72.67 % of
+the run. **This materially weakens SWMM's standing as the reference model in §1.C.** Global continuity can
+close to −0.008 % while local dynamics are poorly resolved, so the §1.C disagreement metrics (Jaccard 0.103,
+ρ 0.400 / 0.743, 12.02× flooded volume) must be read as "FloodNet vs a SWMM run that is itself straining on
+this network", not as "FloodNet vs ground truth". *(The 0.0 read is a defect in `swmm_compare.py`, which this
+pass does not own; it was not fixed here. The `.rpt` figures above were read directly from the committed
+files and are independent of the buggy code path.)*
 
 **A5 — Regression suite.** `pytest` on `backend/`: **136 passed, 4 skipped** in 79 s. (The 4 skips are the
 opt-in live-network smoke tests.)
@@ -145,7 +180,8 @@ All figures reproduced the committed `docs/validation/SWMM.md` exactly:
 | Flooded volume (m³) | 248,641 | 20,680 | ratio **12.02×** |
 | Outfall volume (m³) | 280,228 | 496,539 | ratio **0.564×** |
 | Median peak-depth ratio (837 nodes wet in both) | — | — | **2.13×** |
-| Flow-routing continuity error | — | 0.0000 % | — |
+| Flow-routing continuity error | — | **−0.008 %** (`heavy_direct.rpt`; the previously printed "0.0000 %" was a code artifact — §1.A4) | — |
+| **% of routing steps not converging** | — | **68.77 %** | ⚠ SWMM is straining on this network — §1.A4 |
 
 **What this actually means.** The two models agree well on *which pipes carry the most flow* (ρ = 0.743) and
 poorly on *which nodes surcharge* (Jaccard 0.103) and *how much water leaves the network* (12× on flooded
@@ -383,7 +419,8 @@ memory.
 | 3 | Coupled engine, `moderate` | mass-balance error | **7.807e-13 %** | Accounting only |
 | 4 | Drainage solver standalone | internal balance error | **1.863e-09 m³** on 528,870 m³ (**3.52e-13 %**) | Accounting only |
 | 5 | Two identical runs, 37 frames | bitwise determinism | **identical**, max abs diff **0.0** | Reproducible |
-| 6 | SWMM export | SWMM continuity error | **0.0000 %** | Export is well-posed |
+| 6 | SWMM export (`heavy_direct.rpt`) | SWMM flow-routing continuity error | **−0.008 %** (⚠ was reported as 0.0000 % — code artifact, §1.A4) | Export is well-posed |
+| 6b | SWMM export (`heavy_direct.rpt`) | % of routing steps not converging | **68.77 %** | ⚠ Weakens SWMM's standing as the reference |
 | 7 | Test suite | pass rate | **136 passed, 4 skipped** | Regression health |
 | 8 | DEM grid | cells flagged unreliable | **407 / 62,220 = 0.654 %** | Input QA |
 | 9 | Network, full population | referential integrity | **100.00 %** (34,711/34,711 both ends) | Input QA |
