@@ -26,6 +26,7 @@ from ..drainage.hydraulics import MIN_DEPTH_M  # read-only: solver's own storage
 from . import state
 from .png import grayscale_png_base64, depth_png_base64
 from ..analysis.hotspots import flood_intelligence, segment_timing
+from ..rainfall.source_manager import active_source_metadata
 from .schemas import SimulateRequest, ReplayRequest, CompareRequest, RouteRequest, TTSRequest
 
 log = logging.getLogger("floodnet.api")
@@ -114,7 +115,16 @@ def data_status():
         engine = {"ok": False, "reason": type(ex).__name__}
     auth = imd.status().to_public_dict()
     src = h["sources"]
-    return {"backend": {"ok": True, "time": datetime.now(timezone.utc).isoformat()},
+    from ..rainfall.source_manager import active_source_metadata
+    latest = state.latest_run()
+    active = active_source_metadata((latest.provenance or {}).get("rainfall_source")) if latest is not None else None
+    return {"imd_auth_status": auth["state"], "imd_refresh_status": auth["refresh_status"],
+            "imd_token_expires_at": auth["expires_at"], "imd_token_expiry_basis": auth["expiry_basis"],
+            "active_rainfall_source": active["source_label"] if active else None,
+            "active_source_timestamp": active["timestamp"] if active else None,
+            "fallback_active": bool(active and active["status"] != "ok"),
+            "active_source": active,
+            "backend": {"ok": True, "time": datetime.now(timezone.utc).isoformat()},
             "engine": engine,
             "imd_auth": auth,
             "imd_live": src.get(LIVE_ID, {"ok": None, "reason": "not tried yet"}),
@@ -394,7 +404,8 @@ def summarize(res: SimulationResult) -> dict:
                         "peak_flooded_segments": max(flooded) if flooded else 0,
                         "total_surcharge_m3": _f(sum(float(f.node_surcharge_m3.sum()) for f in frames)),
                         "peak_rain_mm_h": _f(max((f.rain_mm_h for f in frames), default=0.0))},
-            "notes": list(res.notes), "provenance": provenance, "data_mode": state.run_data_mode(res)}
+            "notes": list(res.notes), "provenance": provenance, "data_mode": state.run_data_mode(res),
+            "active_source": active_source_metadata((res.provenance or {}).get("rainfall_source"))}
 
 
 def _severity(cm: float) -> str:

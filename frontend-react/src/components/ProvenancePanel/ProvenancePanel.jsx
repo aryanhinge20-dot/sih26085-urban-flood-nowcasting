@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
-import { getDataStatus } from '../../api/client.js'
+import { useDataStatus } from '../../lib/useDataStatus.js'
 import { provenanceTag } from '../../lib/format.js'
 import { activeSource, utcClock } from '../../lib/sources.js'
 import styles from './ProvenancePanel.module.css'
@@ -46,11 +45,11 @@ function buildCards({ source, rainfallSource, provenance }) {
 const DOT = { ok: '#1f8a4c', warn: '#b45309', bad: '#C4273D', idle: '#9ca3af' }
 function healthItems(d) {
   if (!d) return []
-  const auth = d.imd_auth?.state
+  const auth = d.imd_auth_status
   const tried = (s) => (s?.ok == null ? 'idle' : s.ok ? 'ok' : 'bad')
   return [
-    { key: 'imd', label: 'IMD', tone: auth === 'valid' ? 'ok' : auth === 'expiring_soon' ? 'warn' : auth === 'expired' ? 'bad' : 'idle',
-      title: `IMD sign-in: ${String(auth || 'unknown').replace('_', ' ')}${d.imd_auth?.minutes_left != null && auth !== 'expired' ? ` · ~${Math.round(d.imd_auth.minutes_left)} min left` : ''}` },
+    { key: 'imd', label: 'IMD', tone: auth === 'VALID' ? 'ok' : auth === 'EXPIRING_SOON' ? 'warn' : auth === 'EXPIRED' ? 'bad' : 'idle',
+      title: `IMD sign-in: ${String(auth || 'unknown').replace('_', ' ').toLowerCase()}${d.imd_auth?.minutes_left != null && auth !== 'EXPIRED' ? ` · ~${Math.round(d.imd_auth.minutes_left)} min left` : ''}` },
     { key: 'radar', label: 'Radar', tone: tried(d.radar), title: d.radar?.reason || 'IMD Mumbai-Veravali DWR image' },
     { key: 'ecmwf', label: 'Forecast', tone: tried(d.ecmwf), title: d.ecmwf?.reason || 'ECMWF NWP' },
     { key: 'cache', label: 'Cache', tone: d.cache?.available ? 'ok' : 'idle', title: d.cache?.available ? `Last good field: ${d.cache.original_label}, ${d.cache.age_min} min ago` : 'No cached field yet' },
@@ -58,14 +57,7 @@ function healthItems(d) {
 }
 
 export default function ProvenancePanel() {
-  const [health, setHealth] = useState(null)
-  useEffect(() => {
-    let alive = true
-    const load = () => getDataStatus().then((d) => alive && setHealth(d)).catch(() => alive && setHealth(null))
-    load()
-    const id = setInterval(load, 60000)
-    return () => { alive = false; clearInterval(id) }
-  }, [])
+  const health = useDataStatus()
   const { provenance, run, isStale, scenarioId, currentScenario } = useFloodNet()
 
   const source = activeSource({ run, isStale, scenarioId, currentScenario })

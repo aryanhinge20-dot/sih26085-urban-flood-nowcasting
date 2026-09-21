@@ -1,6 +1,7 @@
 import { useFloodNet, LIVE_ID, ECMWF_ID, RADAR_SRI_ID } from '../../state/FloodNetContext.jsx'
 import { fmt, shortId } from '../../lib/format.js'
 import { activeSource, scenarioLabel, scenarioSubtitle, utcClock } from '../../lib/sources.js'
+import { useDataStatus, imdLiveUsable, imdLiveBadge } from '../../lib/useDataStatus.js'
 import styles from './ScenarioPanel.module.css'
 
 // A hypothetical what-if input the operator chooses (never a measured/real-time blockage reading) --
@@ -57,7 +58,9 @@ export default function ScenarioPanel() {
   const blockageKey = BLOCKAGE_OPTIONS.find((o) => JSON.stringify(o.spec) === JSON.stringify(blockage))?.value ?? 'none'
   const selected = activeSource({ run: null, isStale: true, scenarioId, currentScenario })
   const ranSource = activeSource({ run, isStale, scenarioId, currentScenario })
+  const dataStatus = useDataStatus()
   const liveConfigured = status?.rainfall_providers?.find((p) => p.id === LIVE_ID)?.available !== false
+    && imdLiveUsable(dataStatus)
 
   const summary = run?.summary
   const mb = run?.mass_balance
@@ -87,10 +90,14 @@ export default function ScenarioPanel() {
 
       {scenarioId && (
         <div className={styles.sourceLine}>
-          <span className={`tag-badge tag-${selected.tone}`}>{selected.badge}</span>
+          {(() => {
+            // IMD live: the badge follows the server's latest IMD state, never a stale "IMD LIVE"
+            const b = selected.kind === 'live' ? imdLiveBadge(dataStatus) : { text: selected.badge, tone: selected.tone }
+            return <span className={`tag-badge tag-${b.tone}`}>{b.text}</span>
+          })()}
           <span className={styles.sourceSub}>
             {selected.kind === 'live' && !liveConfigured
-              ? 'IMD credentials are not configured on this server'
+              ? 'IMD sign-in unavailable right now — Best available source will use the next source'
               : scenarioSubtitle(scenarioId, currentScenario?.description)}
             {selected.kind === 'scenario' && currentScenario?.total_mm != null ? ` · ${fmt(currentScenario.total_mm, 0)} mm` : ''}
             {selected.kind === 'replay' && currentScenario?.total_mm != null ? ` · ${fmt(currentScenario.total_mm, 0)} mm` : ''}

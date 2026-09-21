@@ -104,14 +104,16 @@ test('an auto run shows the source it really used, and CACHED / DEMO are never u
     provenance: { rainfall_source: { source_type, detail: { source_status: { label, fell_back: label !== 'LIVE', ...extra } } } },
   })
   const pickAll = (run) => { const s = activeSource({ run, isStale: false, scenarioId: 'auto' }); return [s.name, s.badge, s.fellBack] }
-  assert.deepEqual(pickAll(auto('LIVE', 'live_observation')), ['IMD live observation', 'LIVE', false])
-  assert.deepEqual(pickAll(auto('RADAR-DERIVED', 'radar_image_derived')), ['IMD Mumbai-Veravali DWR', 'RADAR-DERIVED', true])
-  assert.deepEqual(pickAll(auto('FORECAST', 'ecmwf_forecast')), ['ECMWF NWP forecast', 'FORECAST', true])
+  assert.deepEqual(pickAll(auto('LIVE', 'live_observation')), ['IMD live observation', 'IMD LIVE', false])
+  assert.deepEqual(pickAll(auto('RADAR-DERIVED', 'radar_image_derived')), ['IMD Mumbai-Veravali DWR', 'IMD DWR RADAR-DERIVED', true])
+  assert.deepEqual(pickAll(auto('FORECAST', 'ecmwf_forecast')), ['ECMWF NWP forecast', 'ECMWF NWP', true])
   const cached = activeSource({ run: auto('CACHED', 'live_observation', { cached: { age_min: 42, original_label: 'LIVE' } }), isStale: false, scenarioId: 'auto' })
-  assert.equal(cached.badge, 'CACHED'); assert.notEqual(cached.badge, 'LIVE'); assert.equal(cached.cached.age_min, 42)
+  assert.equal(cached.badge, 'CACHED'); assert.doesNotMatch(cached.badge, /LIVE/); assert.equal(cached.cached.age_min, 42)
   assert.deepEqual(pickAll(auto('DEMO', 'scenario')), ['Demo scenario', 'DEMO', true])
   assert.deepEqual([activeSource({ run: null, isStale: false, scenarioId: 'auto' }).name], ['Best available source'])
   assert.equal(activeSource({ run: auto('BOGUS', 'ecmwf_forecast'), isStale: false, scenarioId: 'auto' }).badge, 'FORECAST')
+  // before any run the selection is not a claim about data: no IMD LIVE badge for an unrun auto selection
+  assert.doesNotMatch(activeSource({ run: null, isStale: false, scenarioId: 'auto' }).badge, /LIVE/)
 })
 
 test('final-pass UI: hotspots card, street onset, source health and rotation-free token handling', () => {
@@ -125,4 +127,25 @@ test('final-pass UI: hotspots card, street onset, source health and rotation-fre
   // the browser never handles IMD / TTS / admin credentials
   assert.doesNotMatch(UI, /IMD_API_TOKEN|GOOGLE_TTS_API_KEY|FLOODNET_ADMIN_TOKEN|X-Admin-Token|imd-token/)
   assert.doesNotMatch(UI, /VITE_[A-Z_]*(KEY|TOKEN|SECRET)/)
+})
+
+test('IMD live is only offered as available when the server says the token can answer', async () => {
+  const { imdLiveUsable } = await import('./useDataStatus.js')
+  for (const st of ['VALID', 'EXPIRING_SOON']) assert.equal(imdLiveUsable({ imd_auth_status: st }), true)
+  for (const st of ['EXPIRED', 'UNAVAILABLE']) assert.equal(imdLiveUsable({ imd_auth_status: st }), false)
+  assert.equal(imdLiveUsable(null), true)          // unknown (e.g. status not loaded yet) never blocks the selector
+  assert.match(UI, /IMD sign-in unavailable right now/)
+})
+
+test('the IMD badge never says IMD LIVE after a failed IMD request', async () => {
+  const { imdLiveBadge } = await import('./useDataStatus.js')
+  const b = (d) => imdLiveBadge(d).text
+  assert.equal(b({ imd_auth_status: 'VALID', imd_refresh_status: 'idle', imd_live: { ok: true } }), 'IMD LIVE')
+  assert.equal(b({ imd_auth_status: 'VALID', imd_refresh_status: 'renewed', imd_live: { ok: true } }), 'IMD LIVE')
+  assert.equal(b({ imd_auth_status: 'EXPIRED', imd_refresh_status: 'idle' }), 'IMD AUTH EXPIRED')
+  assert.equal(b({ imd_auth_status: 'EXPIRED', imd_refresh_status: 'refreshing' }), 'IMD RENEWING')
+  assert.equal(b({ imd_auth_status: 'EXPIRED', imd_refresh_status: 'failed' }), 'IMD UNAVAILABLE')
+  assert.equal(b({ imd_auth_status: 'UNAVAILABLE', imd_refresh_status: 'idle' }), 'IMD UNAVAILABLE')
+  assert.equal(b({ imd_auth_status: 'VALID', imd_refresh_status: 'idle', imd_live: { ok: false } }), 'IMD UNAVAILABLE')
+  assert.equal(b(null), 'IMD')
 })

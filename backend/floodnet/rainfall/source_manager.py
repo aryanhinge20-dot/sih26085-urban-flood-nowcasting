@@ -40,6 +40,35 @@ LIVE, RADAR, FORECAST, CACHED, DEMO = "LIVE", "RADAR-DERIVED", "FORECAST", "CACH
 MAX_CACHE_AGE_S = 6 * 3600
 
 
+# source_type (or failover status) -> operator-facing label; the ONLY mapping the backend exposes
+DISPLAY_LABEL = {LIVE: "IMD LIVE", RADAR: "IMD DWR RADAR-DERIVED", FORECAST: "ECMWF NWP", CACHED: "CACHED", DEMO: "DEMO",
+                 "HISTORICAL": "HISTORICAL", "SCENARIO": "SCENARIO"}
+_LABEL_BY_SOURCE_TYPE = {"live_observation": LIVE, "radar_image_derived": RADAR, "ecmwf_forecast": FORECAST,
+                         "historical_replay": "HISTORICAL", "scenario": "SCENARIO"}
+
+
+def active_source_metadata(rainfall_source: Optional[dict], now: Optional[float] = None) -> Optional[dict]:
+    """{source, source_label, timestamp, age_seconds, status} for a run's `rainfall_source` block -- the only
+    rainfall-source facts the API volunteers. `status` is "ok", "fallback" (auto run that did not get its first
+    choice) or "cached" / "demo". Never contains a credential or an upstream error body."""
+    if not rainfall_source:
+        return None
+    st = (rainfall_source.get("detail") or {}).get("source_status") or {}
+    label = st.get("label") or _LABEL_BY_SOURCE_TYPE.get(rainfall_source.get("source_type"), "SCENARIO")
+    ts = rainfall_source.get("timestamp")
+    if st.get("cached"):
+        ts = st["cached"].get("cached_at", ts)
+    age = None
+    try:
+        age = round((now if now is not None else time.time()) - datetime.fromisoformat(str(ts)).timestamp(), 1)
+    except (TypeError, ValueError):
+        pass
+    status = "cached" if label == CACHED else "demo" if label == DEMO else "fallback" if st.get("fell_back") else "ok"
+    return {"source": rainfall_source.get("source_name"), "source_label": DISPLAY_LABEL.get(label, label),
+            "timestamp": ts if age is not None else None, "age_seconds": age, "status": status,
+            "fallback_active": bool(st.get("fell_back"))}
+
+
 def _iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).isoformat()
 
@@ -117,6 +146,10 @@ class SourceManager:
     def reset(self) -> None:
         with self._lock:
             self._last_good, self._health, self._current, self._disk_checked = None, {}, None, True
+
+    def note_attempt(self, sid: str, label: str, ok: bool, reason: Optional[str]) -> None:
+        """Record an attempt made outside `resolve` (e.g. an explicitly chosen IMD-live run)."""
+        self._note(sid, label, ok, reason)
 
     # ------------------------------------------------------------------ internals
     def _note(self, sid: str, label: str, ok: bool, reason: Optional[str]) -> None:

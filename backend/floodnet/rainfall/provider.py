@@ -250,17 +250,36 @@ class IMDObservationProvider(RainfallProvider):
             return self._cache[1], self._cache[2]
         from .imd_auth import manager
         managed = self._api_token is None
-        if managed and not manager.usable():
-            # No request is sent when it is certain to fail (nothing configured, or IMD already rejected this
-            # exact token). Rotating the token clears this immediately -- see docs/DEPLOYMENT.md.
-            raise ProviderUnavailable(f"IMD live source unavailable: {manager.status().detail}")
-        token = self._api_token_now()
+        if managed:
+            # A token KNOWN to be unusable (IMD rejected it, or its own exp has passed) is renewed first; if no
+            # newer token can be obtained the request is not sent (it could only fail).
+            token = manager.token_for_request()
+            if token is None or not manager.usable():
+                raise ProviderUnavailable(f"IMD live source unavailable: {manager.status().detail}")
+        else:
+            token = self._api_token_now()
         try:
             payload, retrieved_at = self._fetch_current_wx(key, token)
         except ProviderUnavailable as ex:
-            if managed and "IMD returned 401" in str(ex):
-                manager.report_auth_failure(token)
-            raise
+            if not managed:
+                raise
+            if "IMD returned 403" in str(ex):
+                manager.report_auth_failure(token, status_code=403)       # key / IP: renewing a token cannot help
+                raise
+            if "IMD returned 401" not in str(ex):
+                raise                                                    # timeout, 5xx, bad payload: not auth
+            manager.report_auth_failure(token, status_code=401)
+            renewed = manager.renew(token)                                # single-flight
+            if renewed is None:
+                raise ProviderUnavailable(f"{ex} Token renewal found no newer token in the configured source.") from None
+            try:
+                payload, retrieved_at = self._fetch_current_wx(key, renewed)   # retry the original request ONCE
+            except ProviderUnavailable as ex2:
+                if "IMD returned 401" in str(ex2):
+                    manager.report_auth_failure(renewed, status_code=401)
+                elif "IMD returned 403" in str(ex2):
+                    manager.report_auth_failure(renewed, status_code=403)
+                raise
         if managed:
             manager.report_success()
         scen, meta = self._normalize(payload, retrieved_at)
@@ -1227,8 +1246,14 @@ def provider_status() -> list[dict]:
     live_row: dict = {"id": LIVE_ID, "source_type": "live_observation", "source_name": "IMD (live observation)",
                        "data_mode": Tag.ESTIMATED.value, "timestamp": None, "resolution_min": None,
                        "status_label": "VERIFIED"}
+    from .imd_auth import manager as _imd_auth
+    _auth = _imd_auth.status()
+    live_row["auth_state"] = _auth.state
     if not _imd_live_provider.is_configured():
         live_row.update(available=False, reason=f"{IMDObservationProvider.API_KEY_ENV} not configured")
+    elif not _imd_auth.usable():
+        # key present but the token is missing / expired / rejected: the live source cannot answer right now
+        live_row.update(available=False, reason=_auth.detail)
     elif _imd_live_provider._cache is not None:  # a cached successful fetch exists -- report it, no new call
         _, scen, meta = _imd_live_provider._cache
         live_row.update(available=True, source_name=meta.source_name, data_mode=meta.data_mode,

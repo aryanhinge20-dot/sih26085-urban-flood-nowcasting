@@ -46,7 +46,7 @@ class _Client:
 @pytest.fixture
 def live_body(monkeypatch):
     monkeypatch.setenv("IMD_API_KEY", "test-key")
-    monkeypatch.setenv("IMD_API_TOKEN", "test-token")
+    monkeypatch.setenv("IMD_API_TOKEN", "test-token-" + "x" * 40)   # realistic length (a fake value)
     monkeypatch.setattr("httpx.Client", _Client)
     list_providers()[LIVE_ID].clear_cache()
     r = client.post("/api/simulate", json={"scenario_id": LIVE_ID, "blockage": {"mode": "none"}, "horizon_min": 30})

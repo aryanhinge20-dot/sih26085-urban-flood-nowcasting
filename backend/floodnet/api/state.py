@@ -338,8 +338,13 @@ def _run_live_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
     IMDObservationProvider) and run the same physics engine on it. Raises ProviderUnavailable (propagated to
     the caller as HTTP 503, see api/main.py) rather than silently substituting a scenario/replay while still
     labelled live -- see docs/LIVE_RAINFALL_AUDIT.md and the FAILURE FALLBACK design it documents."""
-    from ..rainfall.provider import list_providers, LIVE_ID
-    scen, meta = list_providers()[LIVE_ID].get(LIVE_ID)
+    from ..rainfall.provider import list_providers, LIVE_ID, ProviderUnavailable
+    try:
+        scen, meta = list_providers()[LIVE_ID].get(LIVE_ID)
+    except ProviderUnavailable as ex:
+        source_manager.note_attempt(LIVE_ID, "LIVE", False, str(ex))   # so status never shows a stale "IMD LIVE"
+        raise
+    source_manager.note_attempt(LIVE_ID, "LIVE", True, None)
     res = _run_physics(scen, blockage, horizon_min, get_pilot())
     res.provenance = dict(res.provenance)
     # Structured (not just prose) live-source detail for the UI's SOURCE/MODE/STATION/RETRIEVED/RAINFALL/

@@ -62,6 +62,9 @@ export const SCENARIO_LABELS = {
 // CACHED and DEMO stays DEMO whatever the underlying source was.
 export const STATUS_LABELS = ['LIVE', 'RADAR-DERIVED', 'FORECAST', 'CACHED', 'DEMO']
 const TONE_BY_STATUS = { LIVE: 'REAL', 'RADAR-DERIVED': 'RADAR', FORECAST: 'NWP', CACHED: 'UNKNOWN', DEMO: 'SYNTHETIC' }
+export const DISPLAY_BY_STATUS = {
+  LIVE: 'IMD LIVE', 'RADAR-DERIVED': 'IMD DWR RADAR-DERIVED', FORECAST: 'ECMWF NWP', CACHED: 'CACHED', DEMO: 'DEMO',
+}
 
 export function sourceStatusOf(run) {
   const st = run?.provenance?.rainfall_source?.detail?.source_status
@@ -109,7 +112,7 @@ export function activeSource({ run, isStale, scenarioId, currentScenario }) {
   const info = SOURCE_KINDS[kind]
   const name = kind === 'scenario' ? scenarioLabel(id, fromRun ? run.scenario_name : currentScenario?.name) : info.name
   const out = { kind, ...info, name, ran: fromRun, statusLabel: status?.label ?? null, fellBack: Boolean(status?.fell_back), cached: status?.cached ?? null }
-  if (status) { out.badge = status.label; out.tone = TONE_BY_STATUS[status.label] }
+  if (status) { out.badge = DISPLAY_BY_STATUS[status.label]; out.tone = TONE_BY_STATUS[status.label] }
   return out
 }
 

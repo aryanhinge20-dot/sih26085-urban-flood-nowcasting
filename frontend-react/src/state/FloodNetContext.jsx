@@ -1,3 +1,4 @@
+import { refreshDataStatus } from '../lib/useDataStatus.js'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api/client.js'
 
@@ -277,6 +278,7 @@ export function FloodNetProvider({ children }) {
       try {
         const res = await api.simulate({ scenarioId, blockage, horizonMin })
         applyRun(res)
+        refreshDataStatus()
         api
           .getSeries(res.run_id)
           .then(setSeries)
@@ -298,6 +300,7 @@ export function FloodNetProvider({ children }) {
       } catch (e) {
         setSimError(e.message)
         notify(e.message)
+        refreshDataStatus()          // a failed IMD attempt must update the IMD badge at once
         // A failed LIVE/ECMWF attempt must never disturb whatever scenario/replay run is already on screen
         // -- applyRun() above was simply never called, so `run`/`frame`/the map all stay exactly as they were.
         if (isLive) setLiveAttempt(classifyLiveFailure(e))

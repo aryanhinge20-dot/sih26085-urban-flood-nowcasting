@@ -117,7 +117,7 @@ def test_public_status_never_contains_a_credential_or_fingerprint(creds):
     m.report_auth_failure(m.token())
     blob = json.dumps(m.status().to_public_dict())
     assert TOKEN not in blob and KEY not in blob and imd_auth.fingerprint(TOKEN) not in blob
-    assert json.loads(blob)["auto_renewal"] is False                  # no renewal mechanism exists; none is claimed
+    assert "no IMD refresh endpoint" in json.loads(blob)["renewal_method"]   # never claims to log in to IMD
 
 
 # ================================================================== IMD failure matrix -> failover
@@ -218,7 +218,7 @@ def test_expired_jwt_and_missing_token_fail_over_without_calling_imd(monkeypatch
     assert status["label"] == RADAR and "token lifetime elapsed" in status["attempts"][0]["reason"] and calls == []
     monkeypatch.delenv("IMD_API_TOKEN")
     _, _, status = SourceManager().resolve(_providers(), PRIORITY, None, 10800, _demo_scenario())
-    assert status["label"] == RADAR and "not configured" in status["attempts"][0]["reason"] and calls == []
+    assert status["label"] == RADAR and "not available on the server" in status["attempts"][0]["reason"] and calls == []
 
 
 def test_token_expiring_mid_session_keeps_the_dashboard_running_then_recovers_on_rotation(monkeypatch, creds):

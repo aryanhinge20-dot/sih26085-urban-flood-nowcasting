@@ -23,6 +23,8 @@ swmm = ["pyswmm>=2.0"]
 imerg = ["h5py>=3.10"]
 # The IMD Mumbai-Veravali SRI product is a GIF image; only IMDVeravaliSRIImageProvider needs Pillow to read it.
 radar = ["Pillow>=10.0"]
+# Only for IMD_TOKEN_PROVIDER=aws-secretsmanager / aws-ssm (token from AWS instead of a file or env var).
+aws = ["boto3>=1.34"]
 
 [build-system]
 requires = ["setuptools>=68"]
