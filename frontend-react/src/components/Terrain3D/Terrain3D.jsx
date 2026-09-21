@@ -18,6 +18,8 @@ import {
   decodeDem, buildPositions, buildIndices, buildColors, lonLatToGrid, cellAt, surfaceAt, drawnHeight,
   legendStops, RELIEF_OPTIONS, DEFAULT_RELIEF,
 } from '../../lib/terrain3d/dem.js'
+import { buildLabels, LabelLayer, PinLayer } from '../../lib/terrain3d/labels.js'
+import placeData from '../../lib/terrain3d/place_labels.json'
 import styles from './Terrain3D.module.css'
 
 const SKY = 0xe9edf0
@@ -72,9 +74,35 @@ function buildRibbons(dem, features, relief, selectedSegId) {
   return g
 }
 
+/** The road network (GET /api/roads) as thin lines draped on the drawn surface: map context under the labels. */
+function buildRoadLines(dem, features, relief) {
+  const pos = []
+  const onDem = (x, y) => x >= 0 && y >= 0 && x <= dem.widthM && y <= dem.heightM
+  for (const f of features || []) {
+    if (f.geometry?.type !== 'LineString') continue
+    const line = f.geometry.coordinates.map(([lon, lat]) => lonLatToGrid(dem, lon, lat))
+    for (let k = 0; k < line.length - 1; k += 1) {
+      const [x0, y0] = line[k]; const [x1, y1] = line[k + 1]
+      const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / DRAPE_STEP_M))
+      for (let s = 0; s < n; s += 1) {
+        const ax = x0 + ((x1 - x0) * s) / n; const ay = y0 + ((y1 - y0) * s) / n
+        const bx = x0 + ((x1 - x0) * (s + 1)) / n; const by = y0 + ((y1 - y0) * (s + 1)) / n
+        if (!onDem(ax, ay) || !onDem(bx, by)) continue          // roads beyond the DEM would hang off its edge
+        const lift = 0.8 + relief * 0.08
+        pos.push(ax, ay, drawnHeight(dem, surfaceAt(dem, ax, ay), relief) + lift,
+          bx, by, drawnHeight(dem, surfaceAt(dem, bx, by), relief) + lift)
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  return g
+}
+
 export default function Terrain3D({ onClose }) {
-  const { frame, run, isStale, layers, selectedSegId, mapView, currentT, terrainFocus } = useFloodNet()
+  const { frame, run, isStale, layers, selectedSegId, mapView, currentT, terrainFocus, roads, hotspots } = useFloodNet()
   const hostRef = useRef(null)
+  const overlayRef = useRef(null) // geographic labels + flood-spot pins, re-projected on every rendered frame
   const three = useRef(null) // { renderer, scene, camera, controls, terrain, water, ribbons, markers, dem }
   const [dem, setDem] = useState(null)
   const [error, setError] = useState(null)
@@ -168,8 +196,27 @@ export default function Terrain3D({ onClose }) {
     controls.maxDistance = dem.widthM * 3.5
     controls.screenSpacePanning = false
 
+    const roadLines = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({
+      color: 0x5c5046, transparent: true, opacity: 0.4, depthWrite: false,
+    }))
+    scene.add(roadLines)
+
+    // UI chrome floating over the map (side panels, toolbars, the terrain key): the label overlay, pins and the
+    // elevation readout ignore the pointer, so whatever else is topmost at a point is covering the terrain there
+    const coveredTest = () => {
+      const r = renderer.domElement.getBoundingClientRect()           // once per frame
+      return (x, y) => document.elementFromPoint(r.left + x, r.top + y) !== renderer.domElement
+    }
+
     let raf = 0
-    const render = () => { renderer.render(scene, camera) }
+    const render = () => {
+      renderer.render(scene, camera)
+      const t = three.current
+      if (!t) return
+      const w = host.clientWidth; const h = host.clientHeight
+      const taken = t.pins ? t.pins.update(THREE, camera, dem, t.relief, w, h) : []
+      t.labels?.update(THREE, camera, dem, t.relief, w, h, taken, coveredTest())
+    }
     const tick = () => { raf = 0; if (controls.update()) { render(); raf = requestAnimationFrame(tick) } }
     const kick = () => { render(); if (!raf) raf = requestAnimationFrame(tick) }
     controls.addEventListener('change', kick)
@@ -204,7 +251,10 @@ export default function Terrain3D({ onClose }) {
     renderer.domElement.addEventListener('pointermove', onMove)
     renderer.domElement.addEventListener('pointerleave', onLeave)
 
-    three.current = { renderer, scene, camera, controls, terrain, water, ribbons, markers, dem, relief: DEFAULT_RELIEF, render: kick }
+    three.current = {
+      renderer, scene, camera, controls, terrain, water, ribbons, roadLines, markers, dem, relief: DEFAULT_RELIEF, render: kick,
+      labels: null, pins: null,
+    }
     resize()
 
     return () => {
@@ -215,6 +265,7 @@ export default function Terrain3D({ onClose }) {
       controls.dispose()
       geometry.dispose()
       ribbons.geometry.dispose()
+      roadLines.geometry.dispose()
       water.material.map?.dispose()
       renderer.dispose()
       renderer.domElement.remove()
@@ -290,11 +341,48 @@ export default function Terrain3D({ onClose }) {
     t.render()
   }, [dem, live, layers.streets, relief, selectedSegId])
 
+  // ---- map context: road network + geographic labels (OSM) + known flood spots (MCGM) --------------------------
+  useEffect(() => {
+    const t = three.current
+    if (!t || !dem) return
+    t.roadLines.geometry.dispose()
+    t.roadLines.geometry = buildRoadLines(dem, layers.roads ? roads?.features : [], relief)
+    t.render()
+  }, [dem, roads, layers.roads, relief])
+
+  useEffect(() => {
+    const t = three.current
+    const host = overlayRef.current
+    if (!t || !dem || !host) return undefined
+    const layer = new LabelLayer(host, buildLabels(dem, roads, placeData.labels), styles)
+    t.labels = layer
+    t.render()
+    return () => { layer.dispose(); if (three.current) three.current.labels = null }
+  }, [dem, roads])
+
+  useEffect(() => {
+    const t = three.current
+    const host = overlayRef.current
+    if (!t || !dem || !host || !layers.hotspots) return undefined
+    const points = (hotspots?.features || [])
+      .filter((f) => f.geometry?.type === 'Point')
+      .map((f) => {
+        const [x, y] = lonLatToGrid(dem, ...f.geometry.coordinates)
+        return { x, y, active: f.properties?.active !== false, title: f.properties?.name || 'Known flooding spot (MCGM)' }
+      })
+      .filter((p) => p.x >= 0 && p.y >= 0 && p.x <= dem.widthM && p.y <= dem.heightM)
+    const layer = new PinLayer(host, points, styles)
+    t.pins = layer
+    t.render()
+    return () => { layer.dispose(); if (three.current) { three.current.pins = null; three.current.render() } }
+  }, [dem, hotspots, layers.hotspots])
+
   const stops = dem ? legendStops(dem) : []
 
   return (
     <div className={styles.root} data-tour="terrain-3d">
       <div ref={hostRef} className={styles.canvasHost} />
+      <div ref={overlayRef} className={styles.overlay} aria-hidden="true" />
 
       {!dem && !error && <div className={styles.state}>Loading terrain model…</div>}
       {error && (

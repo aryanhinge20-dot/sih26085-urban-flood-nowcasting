@@ -31,13 +31,14 @@ export const ECMWF_ID = 'ecmwf'
 // (floodnet/rainfall/provider.py::IMD_SRI_ID). A radar-DERIVED ESTIMATE, never official IMD QPE or a nowcast.
 export const RADAR_SRI_ID = 'imd_sri'
 
-// A failed live attempt is either "not configured" (no IMD_API_KEY -- the expected, common case right now)
-// or "configured but the request itself failed" (network/parse error) -- api/main.py's 503 detail always
-// names IMD_API_KEY for the former, so that substring is the one signal the frontend needs. Never leaks
+// A failed live attempt is either "not configured" (no IMD API key on the server) or "configured but the
+// request itself failed" (network/parse error). For the former the 503 detail always contains the phrase
+// "live IMD data is disabled" (floodnet/rainfall/provider.py), the one signal the frontend needs. Credential
+// variable names are deliberately never written into the browser bundle. Never leaks
 // anything from `e.message` beyond this classification -- the backend already sanitises it (no key/secrets
 // ever reach this string; see floodnet/rainfall/provider.py's key-leak fix).
 function classifyLiveFailure(e) {
-  if (e?.status === 503 && /IMD_API_KEY/.test(e.message || '')) {
+  if (e?.status === 503 && /live IMD data is disabled/.test(e.message || '')) {
     return { status: 'unavailable', message: 'IMD API credentials are not configured.' }
   }
   return { status: 'error', message: 'IMD request failed.' }

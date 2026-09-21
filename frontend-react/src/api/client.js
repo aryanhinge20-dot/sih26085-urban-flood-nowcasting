@@ -60,49 +60,109 @@ export const getHotspots = () => request('/api/hotspots')
 export const getTerrain = () => request('/api/terrain')
 // The simulator's own DEM, lossless (raw float32) -- the single source for the 3D terrain view.
 export const getDem = () => request('/api/terrain/dem')
-// (getHotspots above = MCGM's known flood spots; this is the run-derived hotspot summary)
-export const getFloodIntelligence = (runId) => request(`/api/simulation/${encodeURIComponent(runId)}/hotspots`)
 export const getDataStatus = () => request('/api/data-status')
 
+// ---------------------------------------------------------------- run recovery (serverless hosting)
+// A run lives in the memory of the backend instance that computed it. On Vercel a follow-up request can reach a
+// different or freshly started instance, which answers 404 {code: "run_not_found"}. The client then re-runs the
+// SAME request once (one re-run shared by all callers), maps the old run_id to the new one, and retries. The UI
+// keeps its original run_id. Scenario runs come back identical; a live/forecast run is recomputed from the
+// rainfall available at that moment.
+const regenerators = new Map()   // run_id -> () => Promise<new run_id>
+const aliases = new Map()        // original run_id -> replacement run_id
+const inFlight = new Map()       // original run_id -> Promise<new run_id>
+
+const isRunNotFound = (e) => e instanceof ApiError && e.status === 404 && e.detail?.detail?.code === 'run_not_found'
+
+function remember(runId, regenerate) {
+  if (runId) regenerators.set(runId, regenerate)
+}
+
+function regenerate(runId) {
+  if (!inFlight.has(runId)) {
+    const p = regenerators.get(runId)()
+      .then((fresh) => { aliases.set(runId, fresh); return fresh })
+      .finally(() => inFlight.delete(runId))
+    inFlight.set(runId, p)
+  }
+  return inFlight.get(runId)
+}
+
+async function withRun(runId, call) {
+  if (runId == null) return call(runId)
+  try {
+    return await call(aliases.get(runId) ?? runId)
+  } catch (e) {
+    if (!isRunNotFound(e) || !regenerators.has(runId)) throw e
+    return call(await regenerate(runId))
+  }
+}
+
+// (getHotspots above = MCGM's known flood spots; this is the run-derived hotspot summary)
+export const getFloodIntelligence = (runId) =>
+  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/hotspots`))
+
+export const getAlert = (runId) =>
+  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/alert`))
+
 // ---------------------------------------------------------------- simulation
-export const simulate = ({ scenarioId, blockage, horizonMin = 180 }) =>
+const postSimulate = ({ scenarioId, blockage, horizonMin = 180 }) =>
   request('/api/simulate', {
     method: 'POST',
     body: { scenario_id: scenarioId, blockage: blockage ?? { mode: 'none' }, horizon_min: horizonMin },
   })
 
-export const getRun = (runId) => request(`/api/simulate/${encodeURIComponent(runId)}`)
+export const simulate = async (args) => {
+  const res = await postSimulate(args)
+  remember(res?.run_id, async () => (await postSimulate(args)).run_id)
+  return res
+}
+
+export const getRun = (runId) => withRun(runId, (id) => request(`/api/simulate/${encodeURIComponent(id)}`))
 
 export const getFrame = (runId, tMin) =>
-  request(`/api/simulation/${encodeURIComponent(runId)}/frame/${tMin}`)
+  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/frame/${tMin}`))
 
 export const getSeries = (runId) =>
-  request(`/api/simulation/${encodeURIComponent(runId)}/series`)
+  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/series`))
 
 export const explainSegment = (runId, segId, tMin) =>
-  request(
-    `/api/simulation/${encodeURIComponent(runId)}/explain/${encodeURIComponent(segId)}` +
+  withRun(runId, (id) => request(
+    `/api/simulation/${encodeURIComponent(id)}/explain/${encodeURIComponent(segId)}` +
       (tMin != null ? `?t_min=${tMin}` : ''),
-  )
+  ))
 
-export const compare = ({ scenarioId, blockage, horizonMin = 180 }) =>
+const postCompare = ({ scenarioId, blockage, horizonMin = 180 }) =>
   request('/api/compare', {
     method: 'POST',
     body: { scenario_id: scenarioId, blockage, horizon_min: horizonMin },
   })
 
-export const stormReplay = ({ blockage, horizonMin = 180 } = {}) =>
+export const compare = async (args) => {
+  const res = await postCompare(args)
+  remember(res?.blocked?.run_id, async () => (await postCompare(args)).blocked.run_id)
+  remember(res?.normal?.run_id, async () => (await postCompare(args)).normal.run_id)
+  return res
+}
+
+const postReplay = ({ blockage, horizonMin = 180 } = {}) =>
   request('/api/storm/replay', {
     method: 'POST',
     body: { blockage: blockage ?? { mode: 'none' }, horizon_min: horizonMin },
   })
 
+export const stormReplay = async (args = {}) => {
+  const res = await postReplay(args)
+  remember(res?.run_id, async () => (await postReplay(args)).run_id)
+  return res
+}
+
 // ---------------------------------------------------------------- routing
 export const findRoute = ({ origin, dest, tMin = 0, vehicle = 'car', runId = null }) =>
-  request('/api/route', {
+  withRun(runId, (id) => request('/api/route', {
     method: 'POST',
-    body: { origin, dest, t_min: tMin, vehicle, run_id: runId },
-  })
+    body: { origin, dest, t_min: tMin, vehicle, run_id: id },
+  }))
 
 // Multiple candidate routes scored under three objectives (see backend/floodnet/routing/router.py
 // safe_routes_multi's docstring): "safest" (flood-depth-penalised), "fastest" (DISTANCE only -- there is no
@@ -111,7 +171,7 @@ export const findRoute = ({ origin, dest, tMin = 0, vehicle = 'car', runId = nul
 // (safe-through-T+X vs. unsafe-by-T+X) when a simulation run is active, computed from the same per-segment
 // series GET /api/simulation/{run_id}/series already serves.
 export const findRouteAlternatives = ({ origin, dest, tMin = 0, vehicle = 'car', runId = null, nCandidates = 3 }) =>
-  request('/api/route/alternatives', {
+  withRun(runId, (id) => request('/api/route/alternatives', {
     method: 'POST',
-    body: { origin, dest, t_min: tMin, vehicle, run_id: runId, n_candidates: nCandidates },
-  })
+    body: { origin, dest, t_min: tMin, vehicle, run_id: id, n_candidates: nCandidates },
+  }))

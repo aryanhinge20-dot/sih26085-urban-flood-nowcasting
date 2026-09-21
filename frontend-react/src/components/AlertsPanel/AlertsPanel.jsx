@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import { apiUrl } from '../../api/client.js'
+import { getAlert } from '../../api/client.js'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import {
   ALERT_LABEL, ADVISORY_LABEL, CATEGORY_COLOR,
@@ -8,24 +8,10 @@ import {
 import { fmt } from '../../lib/format.js'
 import styles from './AlertsPanel.module.css'
 
-// GET /api/simulation/{run_id}/alert (backend/floodnet/api/main.py::alert_draft). Fetched here rather
-// than through src/api/client.js purely because of the file-ownership split in this parallel work
-// session -- client.js is owned by another agent right now. Shape asserted by
+// GET /api/simulation/{run_id}/alert (backend/floodnet/api/main.py::alert_draft), via the API client so a run
+// held by another serverless instance is recovered the same way as every other run request. Shape asserted by
 // backend/tests/test_alerts_cap.py::test_alert_endpoint_contract.
-async function fetchCapDraft(runId) {
-  const res = await fetch(apiUrl(`/api/simulation/${encodeURIComponent(runId)}/alert`))
-  let data = null
-  try {
-    data = await res.json()
-  } catch {
-    data = null
-  }
-  if (!res.ok) {
-    const detail = (data && (data.detail || data.error)) || res.statusText
-    throw new Error(typeof detail === 'string' ? detail : 'CAP draft request failed')
-  }
-  return data
-}
+const fetchCapDraft = (runId) => getAlert(runId)
 
 function capField(draft, name) {
   return draft?.cap?.info?.[0]?.[name]

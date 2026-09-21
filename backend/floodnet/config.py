@@ -34,6 +34,14 @@ FRONTEND_REACT_DIST = REPO_DIR / "frontend-react" / "dist"  # `cd frontend-react
 # never breaks in an environment where `npm run build` hasn't been run yet (e.g. a fresh clone).
 FRONTEND_DIR = FRONTEND_REACT_DIST if FRONTEND_REACT_DIST.is_dir() else FRONTEND_LEGACY_DIR
 
+# --- Runtime environment -------------------------------------------------------------------------------------
+# Vercel sets VERCEL=1 at build and run time. There the frontend is served from the CDN at "/" (api/main.py),
+# the deployment filesystem is read-only, and only /tmp is writable (per instance, not shared, not persistent).
+ON_VERCEL = os.environ.get("VERCEL") == "1"
+# Recreatable caches (last good rainfall field, decoded radar frames). A per-instance warm cache on Vercel;
+# FLOODNET_STATE_DIR overrides. Nothing here is required: a cold instance simply starts without them.
+STATE_DIR = Path(os.environ.get("FLOODNET_STATE_DIR") or ("/tmp/floodnet" if ON_VERCEL else REPO_DIR / "data" / "interim"))
+
 # --- CRS ----------------------------------------------------------------------
 # ALL computation in EPSG:32643 (WGS84 / UTM 43N, metres). Lon/lat (EPSG:4326) only at API/UI boundary.
 CRS_COMPUTE = "EPSG:32643"

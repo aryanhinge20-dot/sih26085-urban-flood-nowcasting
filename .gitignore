@@ -27,3 +27,6 @@ data/interim/last_good_rainfall/
 
 # local demo server logs
 backend/uvicorn-8000.log*
+
+.vercel
+.env*

@@ -149,3 +149,29 @@ test('the IMD badge never says IMD LIVE after a failed IMD request', async () =>
   assert.equal(b({ imd_auth_status: 'VALID', imd_refresh_status: 'idle', imd_live: { ok: false } }), 'IMD UNAVAILABLE')
   assert.equal(b(null), 'IMD')
 })
+
+test('with automatic renewal: RENEWING -> LIVE, UNAVAILABLE only when renewal fails', async () => {
+  const { imdLiveBadge, imdLiveUsable } = await import('./useDataStatus.js')
+  const auto = { imd_auto_renewal: true }
+  assert.equal(imdLiveBadge({ ...auto, imd_auth_status: 'EXPIRED', imd_refresh_status: 'idle' }).text, 'IMD RENEWING')
+  assert.equal(imdLiveBadge({ ...auto, imd_auth_status: 'EXPIRED', imd_refresh_status: 'refreshing' }).text, 'IMD RENEWING')
+  assert.equal(imdLiveBadge({ ...auto, imd_auth_status: 'VALID', imd_refresh_status: 'renewed', imd_live: { ok: true } }).text, 'IMD LIVE')
+  assert.equal(imdLiveBadge({ ...auto, imd_auth_status: 'EXPIRED', imd_refresh_status: 'failed' }).text, 'IMD UNAVAILABLE')
+  assert.equal(imdLiveUsable({ ...auto, imd_auth_status: 'EXPIRED', imd_refresh_status: 'idle' }), true)
+  assert.equal(imdLiveUsable({ ...auto, imd_auth_status: 'EXPIRED', imd_refresh_status: 'failed' }), false)
+  assert.equal(imdLiveUsable({ imd_auth_status: 'EXPIRED', imd_refresh_status: 'idle' }), false)
+})
+
+test('RENEWING auth state reads IMD RENEWING and does not block IMD live', async () => {
+  const { imdLiveBadge, imdLiveUsable } = await import('./useDataStatus.js')
+  const d = { imd_auth_status: 'RENEWING', imd_refresh_status: 'refreshing', imd_auto_renewal: true }
+  assert.equal(imdLiveBadge(d).text, 'IMD RENEWING')
+  assert.equal(imdLiveUsable(d), true)
+})
+
+test('the browser bundle source never handles IMD credentials or tokens', () => {
+  for (const word of ['IMD_EMAIL', 'IMD_PASSWORD', 'IMD_API_KEY', 'IMD_API_TOKEN', 'access_token', 'Authorization',
+    'token.php']) {
+    assert.ok(!UI.includes(word), `frontend source mentions ${word}`)
+  }
+})

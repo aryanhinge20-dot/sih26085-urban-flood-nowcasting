@@ -271,7 +271,7 @@ class IMDObservationProvider(RainfallProvider):
             manager.report_auth_failure(token, status_code=401)
             renewed = manager.renew(token)                                # single-flight
             if renewed is None:
-                raise ProviderUnavailable(f"{ex} Token renewal found no newer token in the configured source.") from None
+                raise ProviderUnavailable(f"{ex} {manager.refresh_detail()}") from None
             try:
                 payload, retrieved_at = self._fetch_current_wx(key, renewed)   # retry the original request ONCE
             except ProviderUnavailable as ex2:
@@ -1170,7 +1170,7 @@ _imerg_provider = IMERGSatelliteProvider()
 # the radar boundary everywhere it is reported.
 _imd_radar_provider = IMDRadarNowcastProvider()
 _synthetic_spatial_provider = SyntheticSpatialProvider()
-_imd_sri_provider = IMDVeravaliSRIImageProvider(frame_dir=config.REPO_DIR / "data" / "interim" / "radar_frames")
+_imd_sri_provider = IMDVeravaliSRIImageProvider(frame_dir=config.STATE_DIR / "radar_frames")
 
 
 def list_providers() -> dict[str, RainfallProvider]:

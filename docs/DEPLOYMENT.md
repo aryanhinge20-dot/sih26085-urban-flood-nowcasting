@@ -1,147 +1,175 @@
-# Deployment (2026-09-21)
+# Deployment — everything on Vercel (2026-09-21)
 
 ```
-Browser ──► Vercel — React/Vite static frontend (SPA fallback; VITE_API_BASE_URL → backend)
-   └──────► AWS Lightsail / EC2 — STATIC public IPv4 → reverse proxy (HTTPS) → Docker → FastAPI
-                                   simulation engine · IMD · radar image · ECMWF · routing · TTS proxy
+Browser ──HTTPS──► Vercel project (one deployment, one origin)
+                    ├── React/Vite build          → Vercel CDN   (/, /dashboard, /assets/*)
+                    └── FastAPI (one Python Function, region bom1 = Mumbai)   (/api/*, /health, /docs)
+                              │  outbound traffic through the project's Static IPs (bom1)
+                              ▼
+                        api.imd.gov.in   X-API-Key: key registered for the Vercel static egress IP
+                                         Authorization: Bearer <token the backend generates itself>
 ```
-One FastAPI app (`floodnet.api.main:app`), one container, one instance.
 
-**Why the backend is not a Vercel function:** runs live in process memory (`api/state.py`), so serverless
-invocations would 404 each other's `run_id`; IMD keys are bound to ONE public IP (verified: `403 IP address … not
-authorized`) and functions have no fixed egress IP; a cold 180-min run measured 115 s; Python deps are ~315 MB.
+The frontend calls the API on the **same origin** (`/api/...`). `VITE_API_BASE_URL` must stay **unset** on Vercel.
 
-## 1. Backend — AWS Lightsail or EC2
-1. Instance: Ubuntu LTS, ≥ 2 vCPU / 4 GB. **Attach a static IP** (Lightsail static IP / EC2 Elastic IP) *before*
-   generating the IMD key. Open 80/443 only; keep 8000 closed to the internet.
-2. Install Docker. Copy the repo (or the built image). Create `/opt/floodnet/.env` from `.env.example`
-   (`chmod 600`); it is never baked into the image (`.dockerignore`) and never committed (`.gitignore`).
-3. Build and run:
-   ```
-   docker build -t floodnet-api .
-   docker run -d --name floodnet --restart unless-stopped -p 127.0.0.1:8000:8000 \
-     --env-file /opt/floodnet/.env \
-     -e IMD_API_TOKEN_FILE=/run/floodnet/imd_token -v /opt/floodnet/secrets:/run/floodnet \
-     -v floodnet-cache:/app/data/interim floodnet-api
-   ```
-   The container runs as an unprivileged user, honours `$PORT`, and has a `HEALTHCHECK` on `/health`.
-4. Reverse proxy + TLS (expected, not bundled): Caddy or nginx + certbot on the host, terminating HTTPS for
-   `api.<your-domain>` and proxying to `127.0.0.1:8000`. Set proxy read timeout ≥ 300 s (a forecast is one long
-   request). Browsers block an `https://` Vercel page from calling an `http://` API, so HTTPS is required.
-5. CORS: `FLOODNET_CORS_ORIGINS=https://<your-app>.vercel.app` (comma-separated for more). Unset = `*`.
+## 1. What deploys
 
-## 2. Frontend — Vercel
-`vercel.json` (repo root) builds `frontend-react/` with `VITE_BASE=/` and rewrites everything except `/assets/*` and
-`/api/*` to `/index.html`; `.vercelignore` keeps `.env`, `backend/`, `data/`, `docs/` out of the upload.
-Project → Environment Variables: **`VITE_API_BASE_URL=https://api.<your-domain>`** (no trailing slash; public, not a
-secret). Without it the site calls `/api/*` on Vercel and gets the SPA page back. 3D terrain needs nothing extra.
-No `VITE_*` variable may ever hold a credential.
-
-## 3. Server environment variables (names only — see `.env.example`)
-| Variable | Purpose |
+| File | Role |
 |---|---|
-| `IMD_API_KEY` | IMD subscription key, bound to the server's static IP |
-| `IMD_API_TOKEN` / `IMD_API_TOKEN_FILE` | IMD bearer token (expires ~hourly) — value, or a file holding it |
-| `IMD_TOKEN_TTL_MIN` | assumed token lifetime for the "expiring soon" estimate (default 60) |
-| `IMD_STATION_ID` | default 43003 (Mumbai-Santacruz) |
-| `FLOODNET_ADMIN_TOKEN` | enables the protected token-rotation endpoint; unset = endpoint does not exist |
-| `FLOODNET_CORS_ORIGINS` | allowed frontend origins |
-| `GOOGLE_TTS_API_KEY`, `FLOODNET_TTS_RATE`, `FLOODNET_TTS_VOICE_*` | optional neural voice |
-| `FLOODNET_RADAR_NOWCAST` | `1` enables the experimental advection nowcast (default off) |
+| `pyproject.toml` (repo root) | Vercel's Python manifest: **runtime dependencies only**, `[tool.vercel] entrypoint = "app:app"`, frontend served from the CDN (`[tool.vercel.fastapi.static] cdn = true`) |
+| `uv.lock` (repo root) | Pinned versions for that manifest |
+| `app.py` (repo root) | Entrypoint: puts `backend/` on the import path and exposes `floodnet.api.main:app` |
+| `vercel.json` | `framework: fastapi`; build command `cd frontend-react && npm ci && VITE_BASE=/ npm run build`; `regions: ["bom1"]`; function `maxDuration: 800`; `excludeFiles` for tests, raw data, docs, `.env` |
+| `.vercelignore` | Never uploaded: `.env*`, `backend/.venv`, `backend/tests`, `node_modules`, `data/raw`, `data/interim`, `docs`, `research` |
+| `backend/floodnet/api/main.py` | On Vercel (`VERCEL=1`), registers `app.frontend("/", directory="frontend-react/dist", fallback="index.html")`. Every API route takes priority over the frontend, and navigation requests such as `/dashboard` get `index.html`. The local-server `/` and `/static` routes are not registered there |
 
-All optional: a missing credential disables only its own source, and the UI says so.
+Local development is unchanged: `cd backend && .venv/Scripts/python -m uvicorn floodnet.api.main:app --port 8000`
+serves the build at `/static`, and `npm run dev` proxies `/api` to it. Test tools live in `backend/pyproject.toml`'s
+`dev` extra (`pip install -e "./backend[dev,radar]"`).
 
-## 4. IMD token rotation — no restart, no frontend rebuild
-IMD issues the bearer token only after a password + CAPTCHA login; **there is no documented refresh endpoint and
-FloodNet does not automate the login.** The token lasts roughly an hour. When it lapses, FloodNet does not stop:
-`auto` runs fall over to radar-derived → ECMWF → cached → demo, labelled as such, and `GET /api/data-status` shows
-`imd_auth.state = expired`.
+## 2. Requirements on the Vercel side
 
-To rotate: log in at https://api.imd.gov.in/public/login.php, copy the token, then **either**
-- overwrite the token file (picked up on the next request):
-  `printf '%s' '<token>' | sudo tee /opt/floodnet/secrets/imd_token >/dev/null` — or
-- call the protected endpoint (exists only when `FLOODNET_ADMIN_TOKEN` is set; use HTTPS only):
-  `curl -X POST https://api.<domain>/api/admin/imd-token -H "X-Admin-Token: $FLOODNET_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"token":"<token>"}'`
-- local development: edit `IMD_API_TOKEN` in the root `.env`; it is re-read on the next request.
+- **Plan: Pro or Enterprise.** Static IPs are not available on Hobby. They cost $100/month per project plus Private
+  Data Transfer (Vercel docs, checked 2026-09-21).
+- **No Large Functions.** Static IPs do not support the Large Functions beta, the extended max duration beta
+  (above 800 s), or container images. FloodNet uses none of them (§6, §7).
 
-The token is never echoed, logged or returned; the response and `/api/data-status` report only the state.
-Before a demo: rotate the token a few minutes ahead and check `imd_auth.state = valid`.
+## 3. Static IP → IMD API key
 
-### 4a. Token source abstraction (`floodnet/rainfall/imd_token_sources.py`)
-The core never knows where the token lives; it asks one `TokenSource` on every IMD request. Choose it with
-`IMD_TOKEN_PROVIDER`:
+1. Vercel dashboard → the project → **Settings → Networking** (the docs call the product "Static IPs" under
+   connectivity) → **Static IPs** → **Manage Active Regions** → choose **bom1 (Mumbai)**. It must be the same region
+   as `vercel.json` `regions`, because Static IPs are per region.
+2. Copy the static IP addresses shown for bom1. Vercel assigns a static IP **pair** per region.
+3. Verify from the running function (optional, needs `FLOODNET_ADMIN_TOKEN`, see §4):
+   `curl -H "X-Admin-Token: $FLOODNET_ADMIN_TOKEN" https://<app>.vercel.app/api/admin/egress-ip`
+   → `{"backend_public_egress_ip": "…", "consistent": true, "vercel_region": "bom1", …}`. It must be one of the
+   dashboard IPs. Call it a few times: traffic may leave through either IP of the pair.
+4. On the IMD portal, generate the production `IMD_API_KEY` for that IP. Never use a developer laptop's IP or a
+   visitor's IP.
 
-| Provider | Use | Settings |
+**Open risk [UNVERIFIED]:** IMD binds a key to one IP, and Vercel gives a *pair*. If outbound traffic uses both
+addresses, requests from the unregistered one will get HTTP 403 "IP address not authorized". Ask IMD whether one key
+can list both IPs, or whether each IP needs its own key. `/api/admin/egress-ip`, called repeatedly, shows which
+addresses are actually used.
+
+## 4. Environment variables (Vercel → Settings → Environment Variables)
+
+| Variable | Scope | Notes |
 |---|---|---|
-| `env` (default) | local development | `IMD_API_TOKEN` (editing the root `.env` is picked up live); `IMD_API_TOKEN_FILE` wins when set |
-| `file` | Docker / Kubernetes secret mount | `IMD_API_TOKEN_FILE` |
-| `aws-secretsmanager` | AWS production | `IMD_TOKEN_SECRET_ID` (+ `IMD_TOKEN_SECRET_KEY` if the secret is JSON), `IMD_TOKEN_CACHE_S` |
-| `aws-ssm` | AWS production | `IMD_TOKEN_SSM_PARAMETER` (SecureString), `IMD_TOKEN_CACHE_S` |
+| `IMD_EMAIL`, `IMD_PASSWORD` | Production (+ Preview if wanted), **Sensitive** | IMD account; the backend generates and renews the token itself |
+| `IMD_API_KEY` | same | the key registered for the static egress IP |
+| `FLOODNET_ADMIN_TOKEN` | Production, Sensitive, optional | enables `/api/admin/egress-ip` and `/api/admin/imd-token`; unset = both return 404 |
+| `GOOGLE_TTS_API_KEY` | optional | neural voice |
 
-A token set through `POST /api/admin/imd-token` always takes precedence until the process restarts.
+These are read only by the Python function. **No `VITE_` variable**, because Vite embeds `VITE_*` values in the
+public bundle. Do **not** set `VITE_API_BASE_URL`, `IMD_API_TOKEN` or `IMD_API_TOKEN_FILE` on Vercel: there is no
+token to paste, and the token file is a local-development option. `.env` is never uploaded (`.vercelignore`) and
+never bundled (`excludeFiles`).
 
-**AWS Secrets Manager / SSM (optional; not needed to run FloodNet):**
-1. `pip install -e "./backend[radar,aws]"` in the image (adds boto3).
-2. Store the token:
-   `aws ssm put-parameter --name /floodnet/imd_token --type SecureString --value '<token>' --overwrite`
-   or `aws secretsmanager put-secret-value --secret-id floodnet/imd --secret-string '<token>'`.
-3. Give the instance role read access to just that one secret: `ssm:GetParameter` (plus `kms:Decrypt` for the key),
-   or `secretsmanager:GetSecretValue`. Credentials come from the instance role, never from `.env`.
-4. Run with `IMD_TOKEN_PROVIDER=aws-ssm IMD_TOKEN_SSM_PARAMETER=/floodnet/imd_token` (or the Secrets Manager pair).
-5. To rotate, run the same `put-parameter` / `put-secret-value` command. FloodNet uses the new value within
-   `IMD_TOKEN_CACHE_S` seconds (default 60). There is no restart, no image rebuild and no Vercel rebuild.
+## 5. Serverless behaviour: what is per instance, and why it is safe
 
-If AWS is unreachable, the source returns no token. The token state becomes `UNAVAILABLE` and `auto` falls back
-(§4b). Nothing crashes.
+A Vercel Function instance keeps memory while warm, but instances are started, reused and discarded by the
+platform. The only writable disk is `/tmp`, which is per instance and not persistent.
 
-### 4b. What happens when the token expires
-| Situation | IMD token state | What IMD live does | What an `auto` run does |
+| State | Where it lives now | On a cold or different instance |
+|---|---|---|
+| Simulation runs (`run_id` → frames) | process memory, last 6 runs | Follow-up requests get 404 `{"code": "run_not_found"}`. The frontend API client (`src/api/client.js`) re-runs the same request once (shared by all waiting calls) and retries. Scenario runs are reproduced exactly; live/forecast runs are recomputed with the rainfall available at that moment |
+| IMD token | process memory (`imd_auth.manager`) | Generated automatically on that instance's first IMD request (one token request per new instance) |
+| Background token keeper | **off on Vercel** (a frozen instance cannot run it) | renewal happens inside requests: no token, under 10 min left, or a 401 |
+| Last good rainfall field, decoded radar frames | `/tmp/floodnet` (`config.STATE_DIR`) | warm-instance cache only; a cold instance simply has no cached field yet |
+| Upstream response caches (IMD, ECMWF, radar) | process memory, TTL | refetched |
+| `/api/data-status` "active source" | the last run on **that** instance | may read "no run yet" on a fresh instance |
+
+No database is added. If runs ever need to survive across instances (for example, sharing a run link), the next
+step would be a small external store (Vercel Blob or KV). That is not required for the prototype.
+
+## 6. Function bundle size (measured)
+
+Linux x86_64 wheels for Python 3.12 from `uv.lock`, uncompressed, measured 2026-09-21 (Vercel does not tree-shake Python):
+
+| Part | Size |
+|---|---|
+| Dependencies, all files | 239.6 MiB (251.2 MB) |
+| Dependencies without their bundled `tests/` folders (excluded in `vercel.json`) | 216.2 MiB (226.7 MB) |
+| FloodNet code + pilot data (without `swmm/`) + React build | 3.6 MiB |
+| **Function total with the exclusions** | **219.9 MiB (230.5 MB)** |
+| Function total if `excludeFiles` does not reach installed packages | 243.2 MiB (255.0 MB) |
+
+Largest dependencies: scipy 62.1 MiB + scipy.libs 29.8, numpy.libs 26.2 + numpy 20.8, pyproj 20.7 + pyproj.libs 12.7,
+pillow.libs 13.4 + PIL 5.2, shapely.libs 5.6 + shapely 4.1, networkx 5.0, pydantic_core 4.7. All of them are imported
+by the running API (checked by loading the app and running a simulation). None can be removed without breaking the
+simulation, routing, the terrain transforms or the radar-derived source.
+
+Vercel's limit for **Python** functions is **500 MB** uncompressed, and Static IPs work at that size. The general
+250 MB limit applies to other runtimes. FloodNet is under 250 MB with the exclusions. Vercel also adds precompiled
+`.pyc` files "when space allows". **The exact size Vercel reports is only known after the first real build**; record it in §9.
+
+## 7. Execution time and memory (measured locally, NOT on Vercel)
+
+Sequential requests pinned to **one CPU core, one math-library thread** (to approximate Vercel's default 1 vCPU /
+2 GB) on the developer laptop (Intel i5-13450HX), 2026-09-21. A Vercel vCPU is probably slower than this core. Treat
+these as lower bounds until they are measured on Vercel (§9, step 9).
+
+| Request | Local time (1 core) | Response | Peak memory (process) |
 |---|---|---|---|
-| valid | `VALID` | answers | uses IMD LIVE |
-| token `exp` within 10 min | `EXPIRING_SOON` | renews first if the secret source holds a newer token, else keeps using the current one | uses IMD LIVE |
-| IMD says 401 (expired / invalid token) | `EXPIRED`; `imd_refresh_status` refreshing → renewed / failed | renews (re-reads the secret source, single-flight), retries the request **once** | IMD LIVE if renewal worked; falls back only if it failed |
-| IMD says 403 (key / IP not authorised) | `UNAVAILABLE` until the key changes | stops sending requests | falls back; a new token will not fix a 403 |
-| no token, or a malformed one | `UNAVAILABLE` | nothing is sent | falls back |
-| token whose own `exp` has passed | `EXPIRED` | renewal first; nothing is sent unless a newer token was found | falls back if none |
-| opaque token older than `IMD_TOKEN_TTL_MIN` | `EXPIRED` (estimate) | still tried; IMD's reply decides | normal |
-| timeout / 5xx / bad payload | unchanged | that request fails | falls back for that run |
+| cold import of the app | 2.1 s | – | 76 MiB |
+| pilot load (`/api/meta`, first call) | 0.3 s | 4 KiB | 91 MiB |
+| small run: cloudburst, 60 min horizon | 19.6 s | 5 KiB | 134 MiB |
+| **full current pilot run: cloudburst, 180 min (UI default)** | **66.3 s** | 5 KiB | 153 MiB |
+| map frame / series (after a run) | 0.5 s / 0.6 s | 1.3 MiB / 0.5 MiB | 153 MiB |
+| route / route alternatives | 0.1 s / 1.5 s | 9 / 17 KiB | 153 MiB |
+| historical replay, 26 July 2005 | 127.5 s | 5 KiB | 175 MiB |
+| compare (normal vs 30 % blocked) | 62.8 s | 15 KiB | 194 MiB |
+| radar-derived (IMD DWR SRI image) run, live download | 47.1 s | 9 KiB | 530 MiB |
+| ECMWF forecast run, live download | 40.5 s | 7 KiB | 530 MiB |
+| IMD live run | 0.6 s → **503** (HTTP 403 from IMD: this laptop's IP is not the key's IP) | – | – |
+| "Best available source" run (fell back to radar-derived) | 46.5 s | 10 KiB | 599 MiB |
+| longest allowed: cloudburst, 720 min horizon | **234.6 s** | 6 KiB | 599 MiB |
 
-Fallback order: **IMD LIVE → IMD DWR RADAR-DERIVED → ECMWF NWP → CACHED** (the last good field, at most 6 h old,
-shown with its age and original source) **→ DEMO** (the deterministic cloudburst scenario). The badge, the Sources
-tab and `/api/data-status` (`imd_auth_status`, `imd_refresh_status`, `imd_token_expires_at`, `active_rainfall_source`,
-`active_source_timestamp`, `fallback_active`) all show the source actually in use. A fallback is never labelled
-IMD LIVE. Choosing "IMD live observation" explicitly still fails with a clear message rather than substituting another
-source. Only "Best available source" falls back.
+Peak memory stays under 0.6 GiB, well inside the 2 GB default. The 720-min horizon (235 s on this core) and the
+replay (128 s) are the risks against time limits.
 
-Renewal never logs in to IMD: the portal issues tokens only after a password + CAPTCHA login and documents no
-refresh endpoint. Someone still has to put a new token into the secret source. Evidence, and what to ask IMD for:
-`docs/IMD_TOKEN_RENEWAL.md`.
+`vercel.json` sets **`maxDuration: 800`**, the Pro maximum. Static IPs already require Pro, and 800 s is supported
+with Static IPs (only the >800 s beta is not). The default 300 s would leave little margin for the 720-min horizon
+on a slower vCPU. Every response is far below Vercel's 4.5 MB response limit: the largest, one map frame, is 1.3 MiB.
 
-## 5. Health
-`GET /health` (liveness, no dependencies) · `GET /api/health` · `GET /api/data-status` (backend, engine, IMD token
-state, last IMD / radar / ECMWF attempt, cache age, source used by the last `auto` run; makes no upstream call).
+## 8. IMD authentication (automatic)
 
-## 6. Deployment checklist
-| # | Item | How to check |
-|---|---|---|
-| 1 | Frontend deployed | Vercel build green; `/` and `/dashboard` load and survive refresh |
-| 2 | Backend deployed | `docker ps` healthy; `curl https://api.<domain>/health` → `{"ok":true}` |
-| 3 | Static IP | Elastic/static IP attached; `curl ifconfig.me` on the host matches it |
-| 4 | Domain | `api.<domain>` A-record → the static IP |
-| 5 | TLS | valid certificate; HTTP redirects to HTTPS; proxy timeout ≥ 300 s |
-| 6 | CORS | `FLOODNET_CORS_ORIGINS` = the Vercel URL; browser console shows no CORS error |
-| 7 | Env vars | server `.env` complete (`chmod 600`); Vercel has only `VITE_API_BASE_URL` |
-| 8 | IMD whitelist | IMD key generated for the static IP; `/api/data-status` → `imd_live.ok = true` after an `auto` run |
-| 9 | IMD token | rotation path tested once (§4); `imd_auth.state = valid` |
-| 10 | Radar | run "IMD Mumbai-Veravali DWR": either a run, or the honest stale-frame message |
-| 11 | Fallback | let the token lapse → an `auto` run still completes, labelled FORECAST / CACHED / DEMO |
-| 12 | Health checks | `/health`, `/api/data-status`; Docker `HEALTHCHECK` = healthy |
-| 13 | Smoke test | landing → control centre → Demo scenario → timeline → Alerts / Why / Route / Sources → 3D → briefing |
+The only manual IMD setup is the three Vercel environment variables `IMD_EMAIL`, `IMD_PASSWORD` and `IMD_API_KEY`.
+The backend calls `POST https://api.imd.gov.in/api/oauth/token.php` itself when there is no token, when fewer than 10
+minutes are left, or after an IMD 401. After a 401 it retries the original request exactly once. Renewal is
+single-flight within an instance. A 403 never triggers renewal. A failed generation backs off for 60 s, or 15 min if
+IMD refuses the credentials. Details, states and tests: `docs/IMD_TOKEN_RENEWAL.md`.
 
-## 7. Verified vs not
-| Check | Result |
-|---|---|
-| Vercel-style build (`VITE_BASE=/`, API origin set); no secrets / localhost in the bundle | PASS |
-| `.env` excluded from git, Vercel upload and Docker context; required pilot data tracked | PASS |
-| `docker build`, container start, `/health`, `/api/data-status`, a demo run inside the container | see `FINAL_STATUS.md` |
-| `vercel build`, AWS instance, domain, TLS, IMD key for the production IP, deployed smoke test | **NOT DONE** — needs your accounts |
+| Situation | `imd_auth_status` | IMD live | "Best available source" |
+|---|---|---|---|
+| valid | `VALID` | answers | IMD LIVE |
+| under 10 min left | `EXPIRING_SOON` → `RENEWING` | new token first; keeps the current one if that fails | IMD LIVE |
+| IMD 401 | `RENEWING` → `VALID`, or `EXPIRED` + refresh `failed` | one new token, one retry | IMD LIVE, or falls back only if renewal failed |
+| credentials refused | `UNAVAILABLE` | backs off 15 min | falls back |
+| IMD 403 (key / IP) | `UNAVAILABLE` (`rejected_by: key_or_ip`) | no renewal | falls back; fix the key's IP binding (§3) |
+| timeout / 5xx | unchanged | that request fails | falls back for that run |
+
+Fallback order: IMD LIVE → IMD DWR RADAR-DERIVED → ECMWF NWP → CACHED → DEMO, each labelled as itself, never as IMD LIVE.
+
+Other hosts (Docker, a VM) remain possible. There the background keeper pre-warms the token, and the token or
+credentials may also come from AWS Secrets Manager / SSM (`IMD_CREDENTIALS_PROVIDER`, `IMD_TOKEN_PROVIDER`; see
+`.env.example`). The `Dockerfile` still works but is not part of the Vercel deployment.
+
+## 9. Health and production checklist
+
+`GET /health` → `{"ok":true}` (no dependencies). `GET /api/data-status` → `imd_auth_status`, `imd_refresh_status`,
+`active_rainfall_source`, `active_source_timestamp` (plus source health). It never contains a password, key or token.
+
+| # | Step | How to check | Result |
+|---|---|---|---|
+| 1 | Deploy (`vercel deploy` or Git) | build log green; **record the function size Vercel reports** | not done |
+| 2 | Frontend | `/` and `/dashboard` load and survive a refresh | not done |
+| 3 | API | `/health` → `{"ok":true}`; `/api/data-status` → JSON | not done |
+| 4 | Static IPs (bom1) | dashboard shows the pair; `/api/admin/egress-ip` returns one of them | not done |
+| 5 | IMD key | generated on the IMD portal for that IP (see the open risk in §3) | not done |
+| 6 | Env vars | `IMD_EMAIL`, `IMD_PASSWORD`, `IMD_API_KEY` set as Sensitive; no `VITE_*` | not done |
+| 7 | IMD live | choose "IMD live observation" → run completes; badge **IMD LIVE**; `imd_auth.token_source` = "IMD token endpoint (auto-renewed)" | not done |
+| 8 | Renewal | redeploy or wait for a new instance → first IMD request generates a token by itself; `imd_refresh_status` = renewed | not done |
+| 9 | Timings on Vercel | full cloudburst run and replay complete within `maxDuration`; record them next to §7 | not done |
+| 10 | Bundle scan | built JS has no `IMD_EMAIL`, `IMD_PASSWORD`, `IMD_API_KEY`, `access_token`, `Authorization`, JWT, localhost | PASS locally (2026-09-21) |

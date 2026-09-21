@@ -1,12 +1,21 @@
-# Vercel builds the static frontend only (see docs/DEPLOYMENT.md). Keep secrets and the Python side out.
+# Files never uploaded to Vercel. The whole app (FastAPI function + React build) deploys from the repo root; see
+# docs/DEPLOYMENT.md. Secrets come from Vercel Environment Variables, never from a file.
 .env
 .env.*
 !.env.example
-backend/
-data/
-docs/
-research/
-frontend/
-frontend-react/node_modules/
-frontend-react/dist/
+.claude/
+**/node_modules/
 **/__pycache__/
+**/.pytest_cache/
+backend/.venv/
+backend/tests/
+backend/uvicorn-8000.log*
+frontend-react/dist/
+frontend/
+research/
+docs/
+data/raw/
+data/interim/
+data/processed/pilot/swmm/
+Dockerfile
+.dockerignore

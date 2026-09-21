@@ -37,6 +37,7 @@ class TokenReading:
     value: str
     source: str                          # label safe to show: "environment", ".env", "token file", "aws-ssm", ...
     dated: Optional[float] = None        # epoch seconds the value is known to date from (e.g. file mtime), if any
+    expires_at: Optional[float] = None   # expiry stated by the issuer (IMD `expires_in`), if any
 
 
 def _read_dotenv_value(path: Path, name: str) -> Optional[str]:

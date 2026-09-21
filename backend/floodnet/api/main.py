@@ -6,6 +6,7 @@ Every data-bearing response carries `provenance`. Missing sibling modules -> HTT
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -32,7 +33,19 @@ from .schemas import SimulateRequest, ReplayRequest, CompareRequest, RouteReques
 log = logging.getLogger("floodnet.api")
 FLOOD_SEG_CM = 15.0  # a segment counts as "flooded" at >= 15 cm (minor band, see config.SEVERITY_BANDS_CM)
 
-app = FastAPI(title="FloodNet API", version="0.1.0",
+@asynccontextmanager
+async def _lifespan(_app):
+    # Keep the IMD token fresh in the background when IMD account credentials are configured (no-op otherwise).
+    # FLOODNET_IMD_AUTO_RENEW=0 disables it; request-time renewal (before expiry / after a 401) still applies.
+    # Not on Vercel: a function instance is frozen between requests, so a background thread cannot be relied on
+    # there. Every IMD-backed request obtains / renews the token itself (imd_auth.token_for_request).
+    if os.environ.get("FLOODNET_IMD_AUTO_RENEW", "1") != "0" and not config.ON_VERCEL:
+        from ..rainfall.imd_auth import manager as imd
+        imd.start_keeper()
+    yield
+
+
+app = FastAPI(title="FloodNet API", version="0.1.0", lifespan=_lifespan,
               description="Urban flood nowcasting for the Mumbai Hindmata/Dadar pilot (SIH26085)")
 # FLOODNET_CORS_ORIGINS: comma-separated allowed origins for a separately hosted frontend, e.g.
 # "https://floodnet.vercel.app". Unset = "*" (no cookies/credentials are used, so this is safe for a
@@ -58,14 +71,16 @@ def _index_response():
 # way -- deliberately not a generic "/static/{path:path}" catch-all, which would also swallow 404s for
 # genuinely missing static assets. Registered before /api/*, /docs, /openapi.json are even defined, so those
 # are unaffected either way (different top-level paths, no overlap).
-@app.get("/static/", include_in_schema=False)
-@app.get("/static/dashboard", include_in_schema=False)
-def spa_fallback():
-    return _index_response()
+# On Vercel the frontend is registered with app.frontend("/") at the end of this module instead (served from the
+# CDN, SPA fallback included), so none of these local-server routes exist there.
+if not config.ON_VERCEL:
+    @app.get("/static/", include_in_schema=False)
+    @app.get("/static/dashboard", include_in_schema=False)
+    def spa_fallback():
+        return _index_response()
 
-
-if config.FRONTEND_DIR.is_dir():
-    app.mount("/static", StaticFiles(directory=str(config.FRONTEND_DIR)), name="static")
+    if config.FRONTEND_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(config.FRONTEND_DIR)), name="static")
 
 
 # ----------------------------------------------------------------------------- errors
@@ -84,9 +99,10 @@ def _f(x) -> float:
 
 
 # ----------------------------------------------------------------------------- root / static
-@app.get("/", include_in_schema=False)
-def root():
-    return _index_response()
+if not config.ON_VERCEL:          # on Vercel "/" is the frontend (app.frontend at the end of this module)
+    @app.get("/", include_in_schema=False)
+    def root():
+        return _index_response()
 
 
 @app.get("/api/health")
@@ -119,6 +135,7 @@ def data_status():
     latest = state.latest_run()
     active = active_source_metadata((latest.provenance or {}).get("rainfall_source")) if latest is not None else None
     return {"imd_auth_status": auth["state"], "imd_refresh_status": auth["refresh_status"],
+            "imd_auto_renewal": auth["auto_renewal"],
             "imd_token_expires_at": auth["expires_at"], "imd_token_expiry_basis": auth["expiry_basis"],
             "active_rainfall_source": active["source_label"] if active else None,
             "active_source_timestamp": active["timestamp"] if active else None,
@@ -134,19 +151,45 @@ def data_status():
             "priority": ["LIVE", "RADAR-DERIVED", "FORECAST", "CACHED", "DEMO"]}
 
 
-@app.post("/api/admin/imd-token", include_in_schema=False)
-async def rotate_imd_token(request: Request):
-    """Rotate the IMD bearer token in the RUNNING server (no restart, no frontend rebuild). Disabled unless
-    FLOODNET_ADMIN_TOKEN is set; callers must send it as `X-Admin-Token`. The new IMD token is read from the
-    JSON body {"token": "..."}; it is never echoed, logged or returned."""
+def _require_admin(request: Request) -> None:
+    """Admin endpoints exist only when FLOODNET_ADMIN_TOKEN is set, and need it as `X-Admin-Token`."""
     import hmac
-    from ..rainfall.imd_auth import manager as imd
     expected = os.environ.get("FLOODNET_ADMIN_TOKEN") or ""
     if not expected:
         raise HTTPException(404, "not found")                       # feature off: do not advertise it
     supplied = request.headers.get("X-Admin-Token") or ""
     if not hmac.compare_digest(supplied.encode(), expected.encode()):
         raise HTTPException(403, "forbidden")
+
+
+@app.get("/api/admin/egress-ip", include_in_schema=False)
+def egress_ip(request: Request):
+    """The public IP this backend's OUTBOUND requests come from -- the address the IMD API key must be registered
+    for (on Vercel: the project's Static IP). Asks two public what-is-my-IP services; returns only the IP.
+    Protected like the other admin endpoints so it cannot be used to make this server send requests at will."""
+    _require_admin(request)
+    import httpx
+    seen = {}
+    for name, url in (("ipify", "https://api.ipify.org"), ("aws", "https://checkip.amazonaws.com")):
+        try:
+            ip = httpx.get(url, timeout=8.0).text.strip()
+            if 7 <= len(ip) <= 45 and all(ch in "0123456789abcdefABCDEF.:" for ch in ip):
+                seen[name] = ip
+        except Exception as ex:  # noqa: BLE001
+            seen[name] = f"unavailable ({type(ex).__name__})"
+    ips = sorted({v for v in seen.values() if not v.startswith("unavailable")})
+    return {"backend_public_egress_ip": ips[0] if len(ips) == 1 else None, "observed": seen,
+            "consistent": len(ips) == 1, "vercel": config.ON_VERCEL,
+            "vercel_region": os.environ.get("VERCEL_REGION")}
+
+
+@app.post("/api/admin/imd-token", include_in_schema=False)
+async def rotate_imd_token(request: Request):
+    """Rotate the IMD bearer token in the RUNNING server (no restart, no frontend rebuild). Disabled unless
+    FLOODNET_ADMIN_TOKEN is set; callers must send it as `X-Admin-Token`. The new IMD token is read from the
+    JSON body {"token": "..."}; it is never echoed, logged or returned."""
+    from ..rainfall.imd_auth import manager as imd
+    _require_admin(request)
     try:
         body = await request.json()
         token = str(body["token"]).strip()
@@ -510,8 +553,17 @@ def serialize_frame(res: SimulationResult, k: int) -> dict:
 def _get_run_or_404(run_id: str) -> SimulationResult:
     r = state.get_run(run_id)
     if r is None:
-        raise HTTPException(404, f"run {run_id!r} not found (cache keeps the last {state.MAX_RUNS} runs: {state.list_runs()})")
+        raise _run_not_found(run_id)
     return r
+
+
+def _run_not_found(run_id: Optional[str]) -> HTTPException:
+    """Runs live in the memory of the instance that computed them. On a serverless host (Vercel) a follow-up
+    request can reach a different or freshly started instance, so a missing run is reported with a stable code:
+    the frontend client then re-runs the same simulation once and retries (frontend-react/src/api/client.js)."""
+    return HTTPException(404, {"code": "run_not_found", "run_id": run_id,
+                               "message": f"run {run_id!r} is not held by this server instance "
+                                          f"(it keeps the last {state.MAX_RUNS} runs in memory); run the simulation again"})
 
 
 async def _simulate(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
@@ -873,7 +925,7 @@ async def route(req: RouteRequest):
         raise state.ModuleMissing(f"floodnet.routing.router.safe_route unavailable (Agent F): {e}")
     res: Optional[SimulationResult] = state.get_run(req.run_id) if req.run_id else state.latest_run()
     if req.run_id and res is None:
-        raise HTTPException(404, f"run {req.run_id!r} not found")
+        raise _run_not_found(req.run_id)
     depth = res.frames[_frame_index(res, req.t_min)].street_depth_m if res is not None else {}
     try:
         out: Any = await run_in_threadpool(safe_route, roads_graph, depth, tuple(req.origin), tuple(req.dest), req.vehicle)
@@ -903,7 +955,7 @@ async def route_alternatives(req: RouteRequest):
         raise state.ModuleMissing(f"floodnet.routing.router.safe_routes_multi unavailable (Agent F): {e}")
     res: Optional[SimulationResult] = state.get_run(req.run_id) if req.run_id else state.latest_run()
     if req.run_id and res is None:
-        raise HTTPException(404, f"run {req.run_id!r} not found")
+        raise _run_not_found(req.run_id)
     depth = res.frames[_frame_index(res, req.t_min)].street_depth_m if res is not None else {}
     try:
         out: Any = await run_in_threadpool(safe_routes_multi, roads_graph, depth, tuple(req.origin),
@@ -930,3 +982,11 @@ async def route_alternatives(req: RouteRequest):
     out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(),
                                   "depths": res.provenance if res is not None else None})
     return out
+
+
+# ----------------------------------------------------------------------------- frontend on Vercel
+# Registered last and at the lowest priority: every API route above wins over a frontend file. Vercel promotes this
+# directory to its CDN at build time (pyproject.toml [tool.vercel.fastapi.static]); navigation requests for
+# client-side routes such as /dashboard get index.html. The build is made with VITE_BASE=/ (vercel.json).
+if config.ON_VERCEL:
+    app.frontend("/", directory=str(config.FRONTEND_REACT_DIST), fallback="index.html", check_dir=False)

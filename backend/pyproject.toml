@@ -13,10 +13,11 @@ dependencies = [
   "uvicorn[standard]>=0.27",
   "httpx>=0.27",
   "pydantic>=2.6",
-  "pytest>=8.0",
 ]
 
 [project.optional-dependencies]
+# Test-only. Install with: pip install -e "./backend[dev,radar]"
+dev = ["pytest>=8.0"]
 swmm = ["pyswmm>=2.0"]
 # GPM IMERG granules are HDF5. Only IMERGSatelliteProvider needs this; without it that provider reports
 # ProviderUnavailable naming the missing package rather than failing obscurely at import time.

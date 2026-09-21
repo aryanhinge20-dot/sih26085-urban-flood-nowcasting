@@ -1,0 +1,40 @@
+warning: in the working copy of '.env.example', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.vercelignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/floodnet/api/state.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/floodnet/config.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/floodnet/rainfall/provider.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/tests/conftest.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/tests/test_imd_token_and_failover.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/IMD_TOKEN_RENEWAL.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend-react/index.html', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend-react/src/lib/terrain3d/dem.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'vercel.json', LF will be replaced by CRLF the next time Git touches it
+ .env.example                                       |  23 [32m+[m[31m-[m
+ .gitignore                                         |   3 [32m+[m
+ .vercelignore                                      |  25 [32m+[m[31m-[m
+ backend/floodnet/api/main.py                       | 100 [32m+++++[m[31m--[m
+ backend/floodnet/api/state.py                      |   2 [32m+[m[31m-[m
+ backend/floodnet/config.py                         |   8 [32m+[m
+ backend/floodnet/rainfall/imd_auth.py              | 180 [32m+++++++++[m[31m---[m
+ backend/floodnet/rainfall/imd_token_sources.py     |   1 [32m+[m
+ backend/floodnet/rainfall/provider.py              |   4 [32m+[m[31m-[m
+ backend/pyproject.toml                             |   3 [32m+[m[31m-[m
+ backend/tests/conftest.py                          |   3 [32m+[m[31m-[m
+ backend/tests/test_deploy_config.py                |  21 [32m+[m[31m-[m
+ backend/tests/test_imd_token_and_failover.py       |   2 [32m+[m[31m-[m
+ docs/DEPLOYMENT.md                                 | 308 [32m+++++++++++[m[31m----------[m
+ docs/IMD_TOKEN_RENEWAL.md                          | 150 [32m+++++[m[31m-----[m
+ frontend-react/index.html                          |  10 [32m+[m[31m-[m
+ frontend-react/public/favicon.svg                  |   1 [31m-[m
+ frontend-react/src/api/client.js                   |  94 [32m+++++[m[31m--[m
+ .../src/components/AlertsPanel/AlertsPanel.jsx     |  22 [32m+[m[31m-[m
+ .../components/ProvenancePanel/ProvenancePanel.jsx |   2 [32m+[m[31m-[m
+ .../src/components/Terrain3D/Terrain3D.jsx         |  94 [32m++++++[m[31m-[m
+ .../src/components/Terrain3D/Terrain3D.module.css  |  75 [32m+++++[m
+ frontend-react/src/lib/sources.test.mjs            |  26 [32m++[m
+ frontend-react/src/lib/terrain3d/dem.js            |   4 [32m+[m[31m-[m
+ frontend-react/src/lib/useDataStatus.js            |  12 [32m+[m[31m-[m
+ frontend-react/src/state/FloodNetContext.jsx       |   9 [32m+[m[31m-[m
+ vercel.json                                        |  26 [32m+[m[31m-[m
+ 27 files changed, 863 insertions(+), 345 deletions(-)

@@ -31,15 +31,14 @@ def test_env_is_ignored_by_git_vercel_and_docker():
     assert not re.search(r"^\s*COPY\s+\.env", docker, re.M) and "COPY . " not in docker
 
 
-def test_vercel_builds_the_frontend_with_spa_fallback_and_leaves_api_alone():
+def test_vercel_builds_the_frontend_and_serves_it_from_the_fastapi_project():
+    """One Vercel project: the FastAPI function plus the React build, attached with app.frontend (SPA fallback is
+    FastAPI's own, see test_vercel_deploy.py) -- no static-only rewrite table any more."""
     cfg = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
-    assert cfg["outputDirectory"] == "frontend-react/dist"
+    assert cfg["framework"] == "fastapi" and "outputDirectory" not in cfg and "rewrites" not in cfg
     assert "VITE_BASE=/" in cfg["buildCommand"] and "frontend-react" in cfg["buildCommand"]
-    (rewrite,) = cfg["rewrites"]
-    assert rewrite["destination"] == "/index.html"
-    pattern = re.compile("^" + rewrite["source"] + "$")
-    assert pattern.match("/dashboard") and pattern.match("/")
-    assert not pattern.match("/api/health") and not pattern.match("/assets/index.js")
+    main = (ROOT / "backend/floodnet/api/main.py").read_text(encoding="utf-8")
+    assert 'app.frontend("/", directory=str(config.FRONTEND_REACT_DIST), fallback="index.html"' in main
 
 
 def test_frontend_has_one_configurable_api_origin_and_no_secret_names_behind_vite():
@@ -89,9 +88,9 @@ def test_built_frontend_contains_no_credential_names_values_or_local_urls():
     code = "".join(p.read_text(encoding="utf-8", errors="ignore") for p in assets.rglob("*") if p.suffix in (".js", ".html", ".css"))
     for word in ("IMD_API_TOKEN", "GOOGLE_TTS_API_KEY", "FLOODNET_ADMIN_TOKEN", "X-Admin-Token", "localhost", "127.0.0.1"):
         assert word not in code, word
-    # IMD_API_KEY may appear ONLY as the name inside the "credentials not configured" error matcher
-    assert code.count("IMD_API_KEY") <= 1
-    for name in ("IMD_API_KEY", "IMD_API_TOKEN", "GOOGLE_TTS_API_KEY"):
+    for word in ("IMD_API_KEY", "IMD_EMAIL", "IMD_PASSWORD", "access_token", "Authorization", "oauth/token"):
+        assert word not in code, word                  # not even the names: the browser handles no IMD credential
+    for name in ("IMD_API_KEY", "IMD_API_TOKEN", "IMD_EMAIL", "IMD_PASSWORD", "GOOGLE_TTS_API_KEY"):
         value = os.environ.get(name)
-        if value and len(value) >= 16:
+        if value and len(value) >= 8:
             assert value not in code, f"{name} VALUE is in the frontend bundle"

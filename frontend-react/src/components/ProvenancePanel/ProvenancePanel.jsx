@@ -48,7 +48,7 @@ function healthItems(d) {
   const auth = d.imd_auth_status
   const tried = (s) => (s?.ok == null ? 'idle' : s.ok ? 'ok' : 'bad')
   return [
-    { key: 'imd', label: 'IMD', tone: auth === 'VALID' ? 'ok' : auth === 'EXPIRING_SOON' ? 'warn' : auth === 'EXPIRED' ? 'bad' : 'idle',
+    { key: 'imd', label: 'IMD', tone: auth === 'VALID' ? 'ok' : auth === 'EXPIRING_SOON' || auth === 'RENEWING' ? 'warn' : auth === 'EXPIRED' ? 'bad' : 'idle',
       title: `IMD sign-in: ${String(auth || 'unknown').replace('_', ' ').toLowerCase()}${d.imd_auth?.minutes_left != null && auth !== 'EXPIRED' ? ` · ~${Math.round(d.imd_auth.minutes_left)} min left` : ''}` },
     { key: 'radar', label: 'Radar', tone: tried(d.radar), title: d.radar?.reason || 'IMD Mumbai-Veravali DWR image' },
     { key: 'ecmwf', label: 'Forecast', tone: tried(d.ecmwf), title: d.ecmwf?.reason || 'ECMWF NWP' },

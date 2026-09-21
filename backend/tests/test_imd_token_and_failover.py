@@ -117,7 +117,7 @@ def test_public_status_never_contains_a_credential_or_fingerprint(creds):
     m.report_auth_failure(m.token())
     blob = json.dumps(m.status().to_public_dict())
     assert TOKEN not in blob and KEY not in blob and imd_auth.fingerprint(TOKEN) not in blob
-    assert "no IMD refresh endpoint" in json.loads(blob)["renewal_method"]   # never claims to log in to IMD
+    assert "credentials not configured" in json.loads(blob)["renewal_method"]   # no credentials in tests
 
 
 # ================================================================== IMD failure matrix -> failover

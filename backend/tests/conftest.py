@@ -15,7 +15,8 @@ def _no_real_imd_credentials(monkeypatch):
         yield
         return
     monkeypatch.setenv("IMD_API_TOKEN", FAKE_IMD_TOKEN)
-    for name in ("IMD_API_TOKEN_FILE", "IMD_TOKEN_PROVIDER"):
+    monkeypatch.setenv("FLOODNET_IMD_AUTO_RENEW", "0")
+    for name in ("IMD_API_TOKEN_FILE", "IMD_TOKEN_PROVIDER", "IMD_EMAIL", "IMD_PASSWORD", "IMD_CREDENTIALS_PROVIDER"):
         monkeypatch.delenv(name, raising=False)
     from floodnet.rainfall import imd_auth
     monkeypatch.setattr(imd_auth.manager, "_dotenv", imd_auth.config.REPO_DIR / "__no_dotenv_in_tests__")

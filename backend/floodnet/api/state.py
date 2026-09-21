@@ -414,7 +414,7 @@ def _run_gridded_scenario(scenario_id: str, blockage: dict, horizon_min: int) ->
 
 from ..rainfall.source_manager import SourceManager, AUTO_ID, DEMO_ID, GOLDEN_SCENARIO_ID  # noqa: E402
 
-source_manager = SourceManager(cache_dir=config.REPO_DIR / "data" / "interim" / "last_good_rainfall")
+source_manager = SourceManager(cache_dir=config.STATE_DIR / "last_good_rainfall")
 
 
 def _run_auto_scenario(blockage: dict, horizon_min: int) -> SimulationResult:

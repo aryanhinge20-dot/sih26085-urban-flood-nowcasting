@@ -1,68 +1,90 @@
-# IMD token renewal — what exists, what FloodNet does, what IMD must provide
+# IMD token renewal
 
-Status: investigated 2026-09-21. Evidence below is from IMD's **public** pages and from metadata of our own token
-(the value itself was never printed or logged). Anything about the logged-in dashboard is **[UNVERIFIED]**.
+FloodNet renews the IMD bearer token automatically using IMD's token-generation endpoint with the registered IMD
+account credentials, as long as those credentials remain valid.
 
-## 1. How IMD issues the token (evidence)
+## 1. The endpoint
 
-| Item | Observed |
+`POST https://api.imd.gov.in/api/oauth/token.php`
+
+| Item | Status |
 |---|---|
-| Login page | `login.php`: `<form method="POST">` with fields `email`, `password`, `captcha`, `captcha_key`, `csrf` |
-| CAPTCHA | image from `captcha_image.php?key=…`, a new key per page load |
-| Session | `PHPSESSID` cookie (Secure, HttpOnly); the page loads no external scripts and fetches no token via JS |
-| Registration | `register.php`: same form + CAPTCHA pattern |
-| API reference | `api_reference.html`: **no** mention of token, JWT, refresh, login, Authorization or Bearer |
-| Token shape | 104 characters, 2 parts: `base64url(JSON {"uid": <int>, "exp": <epoch>})` + `.` + 48-byte signature |
-| Token claims | `uid`, `exp` only — no `iat`, `iss`, `aud`, refresh token or refresh URL |
-| API key | 64-hex `X-API-Key`, bound to the server's public IP; shares nothing with the token; not used for renewal |
+| The endpoint is IMD's official token endpoint | Confirmed by the IMD account holder. It is **not** listed on the public `public/api_reference.html` (checked 2026-09-21) |
+| Request body | JSON `{"email": "...", "password": "..."}`. Checked 2026-09-21: an empty or form-encoded body gets HTTP 400 "email and password required"; JSON with fake credentials gets HTTP 401 "Invalid credentials" |
+| Success response | HTTP 200 with `access_token`, `token_type` "Bearer" and `expires_in` 3600 (verified live 2026-09-21, §5) |
+| CAPTCHA | Not required by this endpoint. The portal *web* login (`login.php`) still uses a CAPTCHA; FloodNet never touches that form |
 
-**Conclusion (public flow):** the token is issued inside the portal dashboard after an email + password + CAPTCHA
-login. IMD documents **no** refresh endpoint, refresh token or machine credential. Unattended renewal from IMD is
-therefore **not possible through any documented mechanism**, and FloodNet does not attempt it. It does not bypass
-or solve the CAPTCHA, automate the login form, or probe for undocumented endpoints.
+The token is sent to the data API as `Authorization: Bearer <token>`, next to the separate, IP-bound `X-API-Key`
+(`IMD_API_KEY`). The API key plays no part in token generation.
 
-## 2. What FloodNet's "renewal" actually does
+## 2. Credentials (backend-only secrets)
 
-Renewal re-reads the **configured server-side secret source** (token file, `.env`, environment, AWS Secrets
-Manager or SSM) without using its cache, and uses a newer, well-formed token it finds there. It never contacts IMD's login.
+| Variable | Meaning |
+|---|---|
+| `IMD_EMAIL`, `IMD_PASSWORD` | The registered IMD portal account |
+| `IMD_CREDENTIALS_PROVIDER` | `env` (default) · `aws-secretsmanager` (`IMD_CREDENTIALS_SECRET_ID`, JSON `{"IMD_EMAIL", "IMD_PASSWORD"}`) · `aws-ssm` (`IMD_EMAIL_SSM_PARAMETER`, `IMD_PASSWORD_SSM_PARAMETER`, SecureString) |
+| `IMD_TOKEN_URL` | Override for the endpoint (default above) |
+| `FLOODNET_IMD_AUTO_RENEW` | `0` turns off the background keeper; renewal at request time still runs |
 
-- **Proactive:** if the token's own `exp` is less than 10 minutes away, a newer token is picked up before IMD
-  rejects the old one. If nothing newer exists, the current token keeps being used until it expires.
-- **On 401:** the token is marked rejected → renewal runs → the original request is retried **once** with the new
-  token → only if renewal finds nothing, or the retry fails, does "Best available source" fall back
-  (radar-derived → ECMWF → cached → demo).
-- **Single-flight:** concurrent 401s share one renewal and one secret-store read. There is no refresh storm.
-- **403** (key or IP refused) is a configuration error. It never triggers renewal.
-- **Malformed** values (bad length, whitespace or control characters) are never sent to IMD.
-- **Status** (`GET /api/data-status`): `imd_auth_status`, `imd_refresh_status` (idle / refreshing / renewed /
-  failed), `imd_token_expires_at`, `active_rainfall_source`, `active_source_timestamp`. No credential or fingerprint is included.
-- **UI badge:** IMD LIVE only while the token is valid and the last IMD request succeeded; otherwise
-  IMD RENEWING / IMD AUTH EXPIRED / IMD UNAVAILABLE.
+These are never sent to the frontend (no `VITE_` variable), and never logged or returned by any API. The same
+goes for the issued token and the `Authorization` header. If IMD's error text ever echoes the email, it is dropped.
 
-So a new token still has to be **placed** in the secret source, by an operator today. The rotation steps are in `DEPLOYMENT.md` §4.
+## 3. Lifecycle (`floodnet/rainfall/imd_auth.py`, `imd_token_issuer.py`)
 
-## 3. What is still unknown — manual check by the account holder
+1. **No token yet** (first start): the app starts without contacting IMD. A background keeper pre-warms a token
+   shortly after start-up and then checks every 60 s; the first IMD-backed request also generates one if needed. If
+   IMD is unreachable, start-up is not affected.
+2. **Under 10 min left** (from the token's own `exp`, or from `expires_in`): a new token is generated and swapped
+   in atomically before the old one lapses. If generation fails, the current token keeps being used until it expires.
+3. **HTTP 401 from IMD**: the token is marked rejected, then **one** token-generation request is made, and the
+   original IMD request is retried **once**. Only if generation or the retry fails does "Best available source" fall
+   back (radar-derived → ECMWF → cached → demo).
+4. **HTTP 403**: key, IP or permission problem. There is **no** token generation.
+5. **Single-flight**: concurrent renewals share one in-flight generation *and its outcome*. Six simultaneous 401s
+   cost one token request, whether it succeeds or fails.
+6. **Back-off**: after a failed generation, no new attempt is made for 60 s, or 15 min if IMD refused the credentials.
+   A wrong password cannot hammer the account.
+7. **Secret-store fallback**: if generation is not configured or fails, renewal re-reads the configured token
+   source (`IMD_TOKEN_PROVIDER`: env / file / aws-secretsmanager / aws-ssm). A manually rotated token still works.
 
-It is not known whether the logged-in dashboard can issue a new token from an existing session **without** a
-new CAPTCHA, or how long that session lasts. To find out (the account holder, in their own browser):
+Precedence of the token in use: admin-endpoint rotation > generated token > configured token source.
 
-1. Log in to the IMD API portal normally.
-2. Open DevTools → Network, tick "Preserve log".
-3. Click whatever the dashboard offers to generate or regenerate a token.
-4. Note **only**: the request URL and method, which cookies or headers it needs (names only), and whether it
-   asks for the CAPTCHA again. Do not copy the token or cookie values anywhere.
-5. Log out, log back in a few hours later, and see whether the session survived.
+## 4. Status and UI
 
-Even if session-based regeneration exists, it is undocumented. **It must not be automated without IMD's written approval.**
+`GET /api/data-status` gives the following fields:
 
-## 4. What to request from IMD for unattended server-side renewal
+- `imd_auth_status`: VALID / EXPIRING_SOON / RENEWING / EXPIRED / UNAVAILABLE
+- `imd_refresh_status`: idle / refreshing / renewed / failed
+- `imd_auto_renewal`: whether credentials are configured
+- `imd_token_expires_at` and `imd_token_expiry_basis`: `jwt_exp` / `issuer_expires_in` / `loaded_at+ttl`
+- `active_rainfall_source` and `active_source_timestamp`
 
-Any one of the following:
+Badge: **IMD RENEWING** (renewal running, or token expired with auto-renewal on) → **IMD LIVE** after a successful
+authenticated request → **IMD UNAVAILABLE** only if renewal failed. Without credentials, an expired token reads
+**IMD AUTH EXPIRED**. IMD LIVE is never shown after a failed IMD request.
 
-1. A **service account / machine-to-machine credential** (for example, OAuth2 client-credentials) to exchange for tokens.
-2. A **documented refresh endpoint** plus a refresh token.
-3. A **long-lived token bound to the server's static IP**, which is already how the API key works.
+## 5. Verification
 
-Contacts listed on the portal's contact page: the Nodal Officer (sankar.nath@imd.gov.in) and kavita.navria@imd.gov.in.
-If IMD provides (1) or (2), it plugs in as one more `TokenSource` (`imd_token_sources.py`). The retry, single-flight
-and status logic stay unchanged.
+**Live result (2026-09-21, development laptop, run through the FastAPI app with no JWT supplied):**
+- The backend called the token endpoint by itself: HTTP 200, `token_type` Bearer, `expires_in` 3600, exactly one
+  token request. Automatic token generation is therefore **verified live**.
+- The following IMD data request got HTTP 403 "IP address not authorized". The laptop's public IP no longer matches
+  the IP that `IMD_API_KEY` was registered for. The 403 correctly did not trigger another token request.
+- Still **not verified live**: IMD data loading with a generated token, and the replace → 401 → renew → retry path.
+  Both need a key registered for the machine that runs the test (DEPLOYMENT.md §3). Rerun the live test below
+  on the production host.
+
+- Automated tests: `backend/tests/test_imd_oauth_renewal.py`, run with fakes and no real credentials. They cover
+  generation success and failure, expiry-triggered renewal, a 401 followed by one generation and one retry (success
+  and failure), single-flight on success and on failure, no renewal on 403, the AWS credential store, the
+  secret-store fallback, and no leak of the email, password, token or header.
+- Live test (opt-in). It runs the real app with no JWT supplied: first request → token generated → IMD data; then
+  the token is replaced with one IMD rejects → 401 → exactly one new token → one retry. It prints only the HTTP
+  status, token_type, expires_in and success/failure, never the token:
+  `RUN_LIVE_IMD=1 .venv/Scripts/python.exe -m pytest tests/test_imd_oauth_live.py -v -s -m live`
+
+## 6. Limits
+
+- Renewal works only while the account credentials remain valid. A password change or account suspension turns
+  every generation into a failure (IMD UNAVAILABLE, back-off, fallback) until the stored credentials are updated.
+- The API key remains bound to one public IP. On Vercel that is the project's Static IP in bom1 (DEPLOYMENT.md §3).

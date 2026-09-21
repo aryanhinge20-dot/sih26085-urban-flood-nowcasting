@@ -1,9 +1,15 @@
 """Server-side IMD credential + token-state manager.
 
-THE PROBLEM: api.imd.gov.in needs an IP-bound key (X-API-Key) AND a short-lived bearer token that the portal
-issues after a password + CAPTCHA login. The token expires roughly hourly. There is NO documented refresh
-endpoint and none is assumed here; this module never logs in, never touches the CAPTCHA, and never claims a
-token was renewed. It only:
+THE PROBLEM: api.imd.gov.in needs an IP-bound key (X-API-Key) AND a short-lived bearer token (about 1 h).
+
+RENEWAL: when IMD account credentials are configured (IMD_EMAIL / IMD_PASSWORD, or a credential store; see
+imd_token_issuer.py) a new token is generated from IMD's token endpoint `POST /api/oauth/token.php`
+  * before the current one expires (under 10 min left), and
+  * after an IMD 401, followed by exactly one retry of the original request (provider.py).
+Renewal is single-flight: concurrent callers share one in-flight renewal and its outcome. After a failed
+generation, new attempts back off for a while (15 min if the credentials were refused), so a wrong password
+cannot hammer the account. Without credentials, renewal falls back to re-reading the configured token source.
+This module also:
 
   * reads the token from a pluggable source (imd_token_sources.py: environment / .env / file / AWS Secrets Manager
     / SSM), re-asked on every request, so a rotated token is used with no restart and no frontend rebuild;
@@ -31,6 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import config
+from .imd_token_issuer import IMDTokenIssuer, TokenIssueError
 from .imd_token_sources import TokenReading, TokenSource, build_source
 
 log = logging.getLogger(__name__)
@@ -38,9 +45,13 @@ log = logging.getLogger(__name__)
 KEY_ENV, TOKEN_ENV, TTL_ENV = "IMD_API_KEY", "IMD_API_TOKEN", "IMD_TOKEN_TTL_MIN"
 DEFAULT_TTL_MIN = 60.0
 EXPIRING_SOON_S = 10 * 60
+ISSUED_SOURCE = "IMD token endpoint (auto-renewed)"
+ISSUE_BACKOFF_S = {"credentials_rejected": 15 * 60, "not_configured": 15 * 60}   # others: 60 s
+NO_NEWER = "Token renewal found no newer token in the configured source."
 MIN_TOKEN_LEN, MAX_TOKEN_LEN = 20, 8192
 
 VALID, EXPIRING_SOON, EXPIRED, UNAVAILABLE = "VALID", "EXPIRING_SOON", "EXPIRED", "UNAVAILABLE"
+RENEWING = "RENEWING"                   # a renewal is in flight right now (reported while it runs)
 
 
 def fingerprint(secret: Optional[str]) -> Optional[str]:
@@ -88,8 +99,9 @@ class TokenStatus:
     last_rejected_at: Optional[float]
     rejected_by: Optional[str] = None       # "token" (401) | "key_or_ip" (403) | None
 
-    refresh_status: str = "idle"            # idle | refreshing | renewed | failed | not_configured
+    refresh_status: str = "idle"            # idle | refreshing | renewed | failed
     last_refresh_at: Optional[float] = None
+    auto_renewal: bool = False              # IMD account credentials configured -> tokens generated automatically
 
     def to_public_dict(self) -> dict:
         """Safe for an API response: states and times only, never a credential or a fingerprint."""
@@ -101,13 +113,14 @@ class TokenStatus:
                 "last_accepted_at": iso(self.last_ok_at), "last_rejected_at": iso(self.last_rejected_at),
                 "rejected_by": self.rejected_by, "refresh_status": self.refresh_status,
                 "last_refresh_at": iso(self.last_refresh_at),
-                # Renewal = re-reading the configured server-side secret source. It never logs in to IMD: the
-                # portal issues tokens only after a password + CAPTCHA login and documents no refresh endpoint.
-                "renewal_method": "reload from the configured secret source (no IMD refresh endpoint exists)"}
+                "auto_renewal": self.auto_renewal,
+                "renewal_method": "IMD token endpoint with the account credentials" if self.auto_renewal else
+                "reload from the configured secret source (IMD account credentials not configured)"}
 
 
 class IMDTokenManager:
-    def __init__(self, dotenv_path: Optional[Path] = None, clock=time.time, source: Optional[TokenSource] = None):
+    def __init__(self, dotenv_path: Optional[Path] = None, clock=time.time, source: Optional[TokenSource] = None,
+                 issuer: Optional[IMDTokenIssuer] = None):
         self._dotenv = dotenv_path if dotenv_path is not None else config.REPO_DIR / ".env"
         self._clock = clock
         self._lock = threading.Lock()
@@ -121,34 +134,96 @@ class IMDTokenManager:
         self._renew_lock = threading.Lock()
         self._refresh_status = "idle"
         self._last_refresh_at: Optional[float] = None
+        self._refresh_detail: Optional[str] = None
+        self._renew_gen = 0                              # completed renewals; lets waiters reuse an outcome
+        self._last_renew_result: Optional[str] = None
+        self._issuer = issuer if issuer is not None else IMDTokenIssuer()
+        self._issued: Optional[TokenReading] = None      # token generated from the account credentials
+        self._issue_blocked_until = 0.0
+        self._keeper: Optional[threading.Thread] = None
+
+    def auto_renewal(self) -> bool:
+        return self._issuer.configured()
 
     # ------------------------------------------------------------------ renewal
     def renew(self, rejected: Optional[str], proactive: bool = False) -> Optional[str]:
-        """Obtain a token different from `rejected`, or None. Only ONE renewal runs at a time: a caller that
-        arrives while another renewal is running waits for it and reuses its result (no refresh storm).
+        """Obtain a token different from `rejected`, or None.
 
-        The renewal step re-reads the configured token source, bypassing any cache (file, .env, environment,
-        AWS Secrets Manager / SSM). It succeeds when that source now holds a newer, well-formed token -- e.g.
-        rotated there by an operator or by an IMD-approved process. It does NOT contact the IMD login page."""
+        Single-flight: one renewal runs at a time. A caller that arrives while one is running waits and then REUSES
+        its outcome (success or failure) instead of starting another, so N simultaneous 401s cost one renewal.
+
+        Order: (1) generate a new token from IMD's token endpoint with the account credentials, if configured;
+        (2) otherwise, or if that failed, re-read the configured token source bypassing its cache."""
+        with self._lock:
+            gen = self._renew_gen
         with self._renew_lock:                  # later callers block here until the running renewal finishes
+            with self._lock:
+                shared, result = self._renew_gen != gen, self._last_renew_result
+            if shared:                          # a renewal completed while we waited: use its outcome
+                return result if result and result != rejected and self._token_not_known_bad(result) else None
             current = self.token()
             if current and current != rejected and self._token_not_known_bad(current):
-                return current                  # someone else's renewal (or a rotation) already produced one
+                return current                  # a rotation already produced a different, usable token
             with self._lock:
                 self._refresh_status = "refreshing"
                 self._runtime = None if self._runtime is not None and self._runtime.value == rejected else self._runtime
-            try:
-                self._source().invalidate()
-            except Exception:  # noqa: BLE001
-                pass
-            fresh = self.token()
-            ok = bool(fresh) and fresh != rejected and self._token_not_known_bad(fresh)
+            fresh, why = None, None
+            if self._issuer.configured():
+                fresh, why = self._generate()
+            if fresh is None:
+                with self._lock:
+                    if self._issued is not None and self._issued.value == rejected:
+                        self._issued = None     # a rejected generated token must not hide the configured source
+                try:
+                    self._source().invalidate()
+                except Exception:  # noqa: BLE001
+                    pass
+                cand = self.token()
+                if cand and cand != rejected and self._token_not_known_bad(cand):
+                    fresh = cand
             with self._lock:
-                # a proactive look-ahead that finds nothing newer is not a failure: the current token still works
-                self._refresh_status = "renewed" if ok else ("idle" if proactive else "failed")
+                # a proactive look-ahead with no credentials that finds nothing newer is not a failure
+                idle = proactive and why is None
+                self._refresh_status = "renewed" if fresh else ("idle" if idle else "failed")
+                self._refresh_detail = None if fresh else (why or NO_NEWER)
                 self._last_refresh_at = self._clock()
-            log.info("IMD token renewal %s (value not logged)", "succeeded" if ok else "found no newer token")
-            return fresh if ok else None
+                self._renew_gen += 1
+                self._last_renew_result = fresh
+            log.info("IMD token renewal %s (value not logged)", "succeeded" if fresh else "failed")
+            return fresh
+
+    def _generate(self) -> tuple[Optional[str], Optional[str]]:
+        """One token-generation request (unless backing off after a recent failure). Returns (token, None) or
+        (None, reason). The new token replaces the current one atomically (a single reference assignment)."""
+        now = self._clock()
+        with self._lock:
+            if now < self._issue_blocked_until:
+                return None, self._refresh_detail or "automatic IMD token generation is backing off after a failure"
+        try:
+            issued = self._issuer.issue()
+        except TokenIssueError as ex:
+            with self._lock:
+                self._issue_blocked_until = now + ISSUE_BACKOFF_S.get(ex.kind, 60)
+            log.warning("automatic IMD token generation failed: %s", ex)      # the message holds no secret
+            return None, f"Automatic IMD token generation failed: {ex}"
+        bad = malformed_reason(issued.value)
+        if bad:
+            with self._lock:
+                self._issue_blocked_until = now + 60
+            return None, f"Automatic IMD token generation returned an unusable token ({bad})"
+        exp = now + issued.expires_in if issued.expires_in else None
+        with self._lock:
+            self._issued = TokenReading(issued.value, ISSUED_SOURCE, now, exp)
+            self._issue_blocked_until = 0.0
+        return issued.value, None
+
+    def _expiry(self, token: str) -> Optional[float]:
+        exp = jwt_expiry(token)
+        if exp is None:
+            issued = self._issued
+            if issued is not None and issued.value == token:
+                exp = issued.expires_at
+        return exp
 
     def _token_not_known_bad(self, token: str) -> bool:
         if malformed_reason(token):
@@ -156,20 +231,41 @@ class IMDTokenManager:
         with self._lock:
             if fingerprint(token) in self._rejected:
                 return False
-        exp = jwt_expiry(token)
+        exp = self._expiry(token)
         return exp is None or exp > self._clock()
 
     def token_for_request(self) -> Optional[str]:
-        """The token to send now. If the current one is KNOWN to be unusable (rejected by IMD, or its own `exp`
-        has passed), renew first -- proactively, before IMD has to say 401."""
+        """The token to send now. If the current one is KNOWN to be unusable (rejected by IMD, or its expiry has
+        passed), or missing while credentials are configured, renew first. Under 10 min left: renew ahead of
+        expiry, and keep using the current token if renewal cannot produce a newer one."""
         tok = self.token()
         if tok and self._token_not_known_bad(tok):
-            exp = jwt_expiry(tok)
+            exp = self._expiry(tok)
             if exp is not None and exp - self._clock() <= EXPIRING_SOON_S:
-                # EXPIRING_SOON: look for a newer token before this one lapses; keep using it if there is none
                 return self.renew(tok, proactive=True) or tok
             return tok
         return self.renew(tok)
+
+    def refresh_detail(self) -> str:
+        with self._lock:
+            return self._refresh_detail or NO_NEWER
+
+    def start_keeper(self, interval_s: float = 60.0) -> None:
+        """Background renewal, so the token stays fresh even when nobody is requesting IMD data. Only runs when
+        account credentials are configured; each tick is just `token_for_request()` (no IMD data call)."""
+        if self._keeper is not None or not self.auto_renewal():
+            return
+
+        def loop():
+            while True:
+                try:
+                    if self.api_key() and self.auto_renewal():
+                        self.token_for_request()
+                except Exception as ex:  # noqa: BLE001 -- the keeper must never die
+                    log.warning("IMD token keeper: %s", type(ex).__name__)
+                time.sleep(interval_s)
+        self._keeper = threading.Thread(target=loop, name="imd-token-keeper", daemon=True)
+        self._keeper.start()
 
     # ------------------------------------------------------------------ credentials (server-side only)
     def api_key(self) -> Optional[str]:
@@ -189,6 +285,8 @@ class IMDTokenManager:
     def _locate(self) -> Optional[TokenReading]:
         if self._runtime is not None:
             return self._runtime
+        if self._issued is not None:
+            return self._issued
         return self._source().read()
 
     def token(self) -> Optional[str]:
@@ -221,7 +319,8 @@ class IMDTokenManager:
             self._rejected.clear()
             self._rejected_keys.clear()
             self._source_key = None
-            self._refresh_status, self._last_refresh_at = "idle", None
+            self._refresh_status, self._last_refresh_at, self._refresh_detail = "idle", None, None
+            self._issued, self._last_renew_result, self._issue_blocked_until = None, None, 0.0
 
     # ------------------------------------------------------------------ what IMD told us
     def report_success(self) -> None:
@@ -243,6 +342,12 @@ class IMDTokenManager:
         s = self._status()
         with self._lock:
             s.refresh_status, s.last_refresh_at = self._refresh_status, self._last_refresh_at
+            failed_why = self._refresh_detail if self._refresh_status == "failed" else None
+        s.auto_renewal = self.auto_renewal()
+        if failed_why and s.state not in (VALID, EXPIRING_SOON):
+            s.detail = f"{s.detail}; {failed_why}"
+        if s.refresh_status == "refreshing" and s.rejected_by != "key_or_ip":
+            s.state, s.detail = RENEWING, "a new IMD token is being obtained"
         return s
 
     def _status(self) -> TokenStatus:
@@ -260,6 +365,13 @@ class IMDTokenManager:
                 self._first_seen.setdefault(fp, now)
             first_seen = self._first_seen.get(fp) if fp else None
 
+        if key and not tok and self.auto_renewal():
+            with self._lock:
+                failed = self._refresh_status == "failed"
+            if failed:
+                return TokenStatus(UNAVAILABLE, "no IMD token", source, None, "unknown", None, True, last_ok, None)
+            return TokenStatus(EXPIRED, "no current IMD token; one is generated automatically from the IMD account "
+                               "credentials on the next request", source, None, "unknown", None, True, last_ok, None)
         if not key or not tok:
             missing = [n for n, ok in ((KEY_ENV, bool(key)), (TOKEN_ENV, bool(tok))) if not ok]
             return TokenStatus(UNAVAILABLE, f"{' and '.join(missing)} not available on the server", source, None,
@@ -277,6 +389,8 @@ class IMDTokenManager:
                                None, "unknown", 0.0, True, last_ok, rejected_at, "token")
         exp = jwt_expiry(tok)
         basis = "jwt_exp"
+        if exp is None and reading.expires_at is not None:
+            exp, basis = reading.expires_at, "issuer_expires_in"
         if exp is None:
             try:
                 ttl_s = float(os.environ.get(TTL_ENV, DEFAULT_TTL_MIN)) * 60.0
@@ -286,7 +400,7 @@ class IMDTokenManager:
             exp, basis = dated + ttl_s, "loaded_at+ttl"
         left = exp - now
         if left <= 0:
-            note = "token lifetime elapsed" if basis == "jwt_exp" else "assumed token lifetime elapsed (not confirmed by IMD)"
+            note = "assumed token lifetime elapsed (not confirmed by IMD)" if basis == "loaded_at+ttl" else "token lifetime elapsed"
             return TokenStatus(EXPIRED, f"{note}; rotate it (docs/DEPLOYMENT.md)", source, exp, basis, left, True,
                                last_ok, None)
         state = EXPIRING_SOON if left <= EXPIRING_SOON_S else VALID
@@ -301,7 +415,7 @@ class IMDTokenManager:
         s = self.status()
         if s.state == UNAVAILABLE or s.last_rejected_at is not None:
             return False
-        return not (s.state == EXPIRED and s.expiry_basis == "jwt_exp")
+        return not (s.state == EXPIRED and s.expiry_basis in ("jwt_exp", "issuer_expires_in"))
 
 
 manager = IMDTokenManager()

@@ -150,8 +150,8 @@ export function buildColors(dem) {
   return colors
 }
 
-export const RELIEF_OPTIONS = [3, 10, 20]
-export const DEFAULT_RELIEF = 10
+export const RELIEF_OPTIONS = [3, 5, 10, 20]
+export const DEFAULT_RELIEF = 5    // visual only: the DEM the simulation uses never changes
 
 export function legendStops(dem) {
   return [dem.p01, (dem.p01 + dem.p99) / 2, dem.p99].map((v) => ({ elevation: v, color: rampColor(dem, v) }))
