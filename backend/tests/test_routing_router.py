@@ -208,3 +208,15 @@ def test_route_time_safety_edge_cases():
     assert route_time_safety(["SEG_A"], [], {}, limit_cm=30.0)["status"] == "unknown: no forecast frames available"
     out = route_time_safety([], [0.0, 30.0], {}, limit_cm=30.0)
     assert out["status"] == "safe (route has no segments)" and out["safe_until_t_min"] == pytest.approx(30.0)
+
+
+def test_direct_route_flood_exposure_is_reported_alongside_the_alternative(pilot):
+    """The Route panel shows A (direct) vs B (lower flood-risk) from real depths -- both must come back."""
+    roads = pilot["roads"]
+    mid = next(s for s in roads.segments if {s.u, s.v} == {1, 2})
+    r = safe_route(roads, {mid.seg_id: 0.45}, _lonlat(roads, 0), _lonlat(roads, 4), vehicle="car")
+    assert r["baseline_max_depth_cm"] == pytest.approx(45.0)          # the direct route crosses the flooded link
+    assert mid.seg_id in r["baseline_segments"]
+    assert r["max_depth_on_route_cm"] < r["baseline_max_depth_cm"]     # the alternative really is lower-risk
+    dry = safe_route(roads, {}, _lonlat(roads, 0), _lonlat(roads, 4), vehicle="car")
+    assert dry["baseline_max_depth_cm"] == 0.0 and dry["route_segments"] == dry["baseline_segments"]

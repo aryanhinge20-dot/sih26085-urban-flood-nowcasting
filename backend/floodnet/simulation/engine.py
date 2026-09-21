@@ -26,6 +26,16 @@ def run_simulation(terrain: Terrain, net: DrainageNetwork, scenario: RainfallSce
     t0 = time.time()
     blockage = blockage or {"mode": "none"}
     g = terrain.grid
+    # Spatial rainfall (SR-01): if the scenario carries a [T, ny, nx] field it MUST already be on this
+    # terrain's grid -- resampling/reprojection is the provider's job (floodnet.rainfall.gridded), not the
+    # engine's, so that the engine never silently regrids and hides a CRS/extent mismatch.
+    if scenario.is_spatial:
+        fg = scenario.field_grid
+        if (fg.ny, fg.nx) != (g.ny, g.nx) or abs(fg.res - g.res) > 1e-9 \
+                or abs(fg.x0 - g.x0) > 1e-6 or abs(fg.y0 - g.y0) > 1e-6:
+            raise ValueError(
+                f"spatial rainfall field grid {fg.to_dict()} does not match the terrain grid {g.to_dict()}; "
+                "the rainfall provider must resample onto the model grid before the engine sees it")
     nj, ni = net.node_cell_j, net.node_cell_i
     on_grid = g.inside(nj, ni) & ~net.node_is_outfall
     nj_g, ni_g = nj[on_grid], ni[on_grid]
@@ -51,9 +61,16 @@ def run_simulation(terrain: Terrain, net: DrainageNetwork, scenario: RainfallSce
     while t < horizon_s - 1e-9:
         step = min(dt_s, next_frame - t)
         # 1. rainfall -> runoff (per cell, metres over this step)
-        i_mm_h = scenario.intensity_at(t)
-        runoff_depth = runoff_fn(i_mm_h, step, terrain)                     # [ny,nx] m
-        rain_in += i_mm_h / 1000.0 / 3600.0 * step * g.cell_area * g.nx * g.ny  # gross rain volume on grid
+        rain_field = scenario.intensity_field_at(t)                         # [ny,nx] mm/h, or None if uniform
+        if rain_field is None:
+            # ---- uniform rainfall: ORIGINAL CODE PATH, byte-identical (frozen core) ----
+            i_mm_h = scenario.intensity_at(t)
+            runoff_depth = runoff_fn(i_mm_h, step, terrain)                 # [ny,nx] m
+            rain_in += i_mm_h / 1000.0 / 3600.0 * step * g.cell_area * g.nx * g.ny  # gross rain volume on grid
+        else:
+            # ---- spatial rainfall: gross volume is the per-cell sum, not intensity x cell count ----
+            runoff_depth = runoff_fn(rain_field, step, terrain)             # [ny,nx] m
+            rain_in += float(np.sum(rain_field)) / 1000.0 / 3600.0 * step * g.cell_area
         runoff_in += float(np.sum(runoff_depth)) * g.cell_area                     # net runoff (after coefficient losses)
         surface.add_runoff(runoff_depth)
         # 2. surface -> drainage (inlet capture limited by inlet + network capacity)

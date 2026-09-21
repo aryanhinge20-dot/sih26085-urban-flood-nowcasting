@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import HeroVisual from './HeroVisual.jsx'
 import styles from './LandingPage.module.css'
+import { PIPELINE_STAGES } from '../../lib/story/stages.js'
 
 const STORY_STAGES = [
   {
@@ -8,8 +9,8 @@ const STORY_STAGES = [
     num: '01',
     phase: 'RAIN',
     headline: 'Rainfall enters the system.',
-    description: 'ECMWF numerical weather prediction, historical gauge records, or synthetic design storms drive the model across the 0–3 hour horizon. Rainfall is applied uniformly over the pilot — the engine does not currently ingest a spatially varying rainfall field.',
-    metric: 'Rainfall intensity (mm/h), uniform',
+    description: 'Live IMD observations, an IMD Mumbai-Veravali radar-derived estimate, ECMWF forecasts, the July 2005 record or design storms drive the 0–3 hour horizon — each labelled by source, as a uniform series or a spatial field on the model grid.',
+    metric: 'Rainfall intensity (mm/h), by source',
   },
   {
     id: 'runoff',
@@ -53,7 +54,7 @@ const STORY_STAGES = [
   },
 ]
 
-export default function LandingPage({ onEnter, isTransitioning }) {
+export default function LandingPage({ onEnter, onExplore, onOpenStage, isTransitioning }) {
   const [activeStage, setActiveStage] = useState(0)
   const [autoPlay, setAutoPlay] = useState(true)
 
@@ -80,7 +81,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
       <nav className={styles.navbar}>
         <div className={styles.navLeft}>
           <span className={styles.brandTitle}>FloodNet</span>
-          <span className={styles.brandBadge}>MUNICIPAL NOWCAST</span>
+          <span className={styles.brandBadge}>URBAN FLOOD INTELLIGENCE</span>
         </div>
 
         <div className={styles.navLinks}>
@@ -168,7 +169,8 @@ export default function LandingPage({ onEnter, isTransitioning }) {
         </div>
 
         {/* Central Command Room Entrance & Identity */}
-        <div className={styles.heroCenterFocal}>
+        {/* data-tour marks this as the "What is FloodNet?" anchor for the Explore FloodNet walkthrough. */}
+        <div className={styles.heroCenterFocal} data-tour="hero">
           <div className={styles.technicalBeacon}>
             <span className={styles.beaconPulse} />
             <span className={styles.technicalBeaconText}>MUMBAI URBAN FLOOD INTELLIGENCE</span>
@@ -207,6 +209,20 @@ export default function LandingPage({ onEnter, isTransitioning }) {
             </button>
           </div>
 
+          {/* Guided product walkthrough. Separate from "EXPLORE FORECAST" above (which scrolls to the
+              physics section) — this one walks the user through the actual interface. */}
+          {onExplore && (
+            <button
+              type="button"
+              className={styles.exploreTourBtn}
+              onClick={onExplore}
+            >
+              <span className={styles.exploreTourGlyph} aria-hidden="true">◎</span>
+              Explore FloodNet
+              <span className={styles.exploreTourHint}>guided tour · 6 steps</span>
+            </button>
+          )}
+
           {/* Precision Telemetry Matrix */}
           <div className={styles.telemetryMatrix}>
             <div className={styles.telemCol}>
@@ -238,7 +254,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
           <span className={styles.sectionKicker}>Coupled Hydrodynamic Simulation</span>
           <h2 className={styles.sectionTitle}>Physics of Mumbai Street Flooding</h2>
           <p className={styles.sectionSubtitle}>
-            Rainfall &rarr; Runoff &rarr; Terrain &rarr; Drainage &rarr; Flood Depth &rarr; Safe Route
+            Rainfall &rarr; Runoff &rarr; Terrain &rarr; Drainage &rarr; Flood Depth &rarr; Action
           </p>
         </div>
 
@@ -387,7 +403,7 @@ export default function LandingPage({ onEnter, isTransitioning }) {
           </div>
           <div className={styles.pillarCard}>
             <div className={styles.pillarIcon}>03</div>
-            <h3 className={styles.pillarTitle}>Assess safer emergency routes</h3>
+            <h3 className={styles.pillarTitle}>Compare lower flood-risk routes</h3>
             <p className={styles.pillarDesc}>
               Vehicle-aware dynamic navigation routing ambulances and emergency services around impassable street corridors.
             </p>
@@ -401,44 +417,32 @@ export default function LandingPage({ onEnter, isTransitioning }) {
           <span className={styles.sectionKicker}>Coupled Physical Architecture</span>
           <h2 className={styles.sectionTitle}>How FloodNet Works</h2>
           <p className={styles.sectionSubtitle}>
-            Numerical Weather Prediction &middot; 2D Overland Cells &middot; 1D Pipe Conduit Hydraulics &middot; Decision Routing
+            Rain &rarr; Spatial rainfall &rarr; Runoff &rarr; 2D surface flow &rarr; Drainage network &rarr; Flood depth &rarr; Action
           </p>
         </div>
 
-        {/* Coupled Model Methodology */}
-        <div className={styles.methodGrid}>
-          <div className={styles.methodCard}>
-            <span className={styles.cardIndex}>01 / METEOROLOGY</span>
-            <h4 className={styles.cardHeading}>Numerical Weather Prediction</h4>
-            <p className={styles.cardBody}>
-              ECMWF numerical weather prediction (NWP) forecasts, historical storm records, and synthetic design-storm scenarios — each clearly labeled by source — resampled into 5-minute simulation timesteps.
-            </p>
-          </div>
-
-          <div className={styles.methodCard}>
-            <span className={styles.cardIndex}>02 / SURFACE HYDROLOGY</span>
-            <h4 className={styles.cardHeading}>2D Storage-Cell Flow</h4>
-            <p className={styles.cardBody}>
-              Finite-volume overland routing computes sheet flow along 10m DEM elevation gradients into the Hindmata depression.
-            </p>
-          </div>
-
-          <div className={styles.methodCard}>
-            <span className={styles.cardIndex}>03 / SUBSURFACE HYDRAULICS</span>
-            <h4 className={styles.cardHeading}>1D Pipe Conduit Network</h4>
-            <p className={styles.cardBody}>
-              Capacity-limited graph solver evaluates junction hydraulic grade lines, pipe conveyance limits, and street gully surcharge &mdash; not a full Saint-Venant dynamic-wave model.
-            </p>
-          </div>
-
-          <div className={styles.methodCard}>
-            <span className={styles.cardIndex}>04 / DECISION SUPPORT</span>
-            <h4 className={styles.cardHeading}>Dynamic Vehicle Routing</h4>
-            <p className={styles.cardBody}>
-              Dijkstra routing engine maps street-by-street flood depths against ambulance (40 cm) and car (30 cm) wading thresholds.
-            </p>
-          </div>
-        </div>
+        {/* The seven-stage chain — same data as the dashboard story strip (lib/story/stages.js) */}
+        <ol className={styles.pipeGrid}>
+          {PIPELINE_STAGES.map((st, i) => (
+            <li key={st.id} className={styles.pipeItem}>
+              <button
+                type="button"
+                className={styles.pipeCard}
+                onClick={() => onOpenStage?.(st.id)}
+                title="Open this stage in the live dashboard"
+              >
+                <span className={styles.pipeTop}>
+                  <span className={styles.pipeGlyph} aria-hidden="true">{st.glyph}</span>
+                  <span className={styles.cardIndex}>{String(i + 1).padStart(2, '0')}</span>
+                </span>
+                <span className={styles.pipeTitle}>{st.title.en}</span>
+                <span className={styles.pipeLine}>{st.line.en}</span>
+                <span className={`tag-badge tag-${st.badge.tag}`}>{st.badge.text}</span>
+              </button>
+              {i < PIPELINE_STAGES.length - 1 && <span className={styles.pipeArrow} aria-hidden="true">↓</span>}
+            </li>
+          ))}
+        </ol>
       </section>
 
       {/* 6. Pilot Area: Mumbai Hindmata-Dadar */}
@@ -482,41 +486,41 @@ export default function LandingPage({ onEnter, isTransitioning }) {
         <div className={styles.capGrid}>
           <div className={styles.capCard}>
             <div className={styles.capHeader}>
-              <span className={styles.capBadge}>Scenarios</span>
-              <h4 className={styles.capTitle}>ECMWF, Replay &amp; Cloudburst</h4>
+              <span className={styles.capBadge}>Rainfall</span>
+              <h4 className={styles.capTitle}>Rainfall Sources</h4>
             </div>
             <p className={styles.capBody}>
-              Run ECMWF NWP forecasts, replay the July 2005 Mumbai deluge (380.8 mm in 3 hours, per the Chitale Committee report), or simulate synthetic cloudburst stress tests.
+              Use live IMD observations, radar-derived rainfall estimates and forecast scenarios.
             </p>
           </div>
 
           <div className={styles.capCard}>
             <div className={styles.capHeader}>
               <span className={styles.capBadge}>Hydraulics</span>
-              <h4 className={styles.capTitle}>Drainage Surcharge Toggles</h4>
+              <h4 className={styles.capTitle}>Drainage Stress</h4>
             </div>
             <p className={styles.capBody}>
-              Compare normal drainage conditions against simulated 50% drain blockages to predict backwater surges before they occur.
+              See where the stormwater network reaches capacity, and test a what-if blockage scenario.
             </p>
           </div>
 
           <div className={styles.capCard}>
             <div className={styles.capHeader}>
               <span className={styles.capBadge}>Timeline</span>
-              <h4 className={styles.capTitle}>0–3 Hour Scrubbing</h4>
+              <h4 className={styles.capTitle}>0–3 Hour Forecast</h4>
             </div>
             <p className={styles.capBody}>
-              Scrub continuously from T+0 to T+180 min to monitor peak accumulation, stagnation windows, and flood recession.
+              Step through the forecast in 5-minute frames to find the peak and the recession.
             </p>
           </div>
 
           <div className={styles.capCard}>
             <div className={styles.capHeader}>
               <span className={styles.capBadge}>Emergency</span>
-              <h4 className={styles.capTitle}>Clearance-Safe Navigation</h4>
+              <h4 className={styles.capTitle}>Flood-aware Routing</h4>
             </div>
             <p className={styles.capBody}>
-              Select origin and destination coordinates on the map to compute detour routes that bypass flooded intersections safely.
+              Pick an origin and destination to compare the direct route with a lower flood-risk route.
             </p>
           </div>
         </div>
@@ -533,6 +537,8 @@ export default function LandingPage({ onEnter, isTransitioning }) {
             and never presented as something it isn't.
           </p>
           <div className={styles.trustBadges}>
+            <span className={styles.trustBadge}>IMD Live Observations</span>
+            <span className={styles.trustBadge}>IMD Mumbai-Veravali DWR · radar-derived estimate</span>
             <span className={styles.trustBadge}>ECMWF Open Data NWP</span>
             <span className={styles.trustBadge}>OpenStreetMap Mumbai Geometry</span>
             <span className={styles.trustBadge}>10m Digital Elevation Model</span>

@@ -15,8 +15,9 @@ Six providers are wired today:
                                  `ProviderUnavailable` (not a fabricated value) when no key is configured or
                                  the call fails.
   - `ECMWFForecastProvider`     NWP forecast (0-3h precipitation) from ECMWF via Open-Meteo
-                                 (api.open-meteo.com/v1/ecmwf), used as a temporary stand-in while official
-                                 IMD API access is pending -- see `docs/ECMWF_OPENMETEO_AUDIT.md`. This is a
+                                 (api.open-meteo.com/v1/ecmwf) -- see `docs/ECMWF_OPENMETEO_AUDIT.md`.
+                                 (Introduced while IMD API access was pending; IMD access has worked since
+                                 2026-09-18 and ECMWF remains the forward-looking NWP source.) This is a
                                  numerical-weather-prediction FORECAST, not a radar nowcast and not an IMD
                                  product; never labelled as either. Raises `ProviderUnavailable` (not a
                                  fabricated value) if the call fails or returns insufficient data.
@@ -59,6 +60,9 @@ HISTORICAL_REPLAY_ID = "july2005"
 LIVE_ID = "live"
 ECMWF_ID = "ecmwf"
 RADAR_ID = "imd_radar"
+IMERG_ID = "imerg"        # NASA/JAXA GPM IMERG satellite QPE -- gridded, CC0, NOT radar (see the provider)
+SPATIAL_SYNTHETIC_ID = "synthetic_spatial"   # invented moving storm; exercises the spatial pathway
+IMD_SRI_ID = "imd_sri"   # EXPERIMENTAL field decoded from IMD's public Mumbai-Veravali DWR SRI *image*
 
 
 @dataclass(frozen=True)
@@ -209,10 +213,13 @@ class IMDObservationProvider(RainfallProvider):
         self._cache: Optional[tuple[float, RainfallScenario, RainfallSourceMeta]] = None
 
     def _api_key_now(self) -> Optional[str]:
-        return self._api_key if self._api_key is not None else os.environ.get(self.API_KEY_ENV)
+        from .imd_auth import manager
+        return self._api_key if self._api_key is not None else manager.api_key()
 
     def _api_token_now(self) -> Optional[str]:
-        return self._api_token if self._api_token is not None else os.environ.get(self.API_TOKEN_ENV)
+        # Server-side token manager: hot-reloads a rotated token (file / .env / admin endpoint) with no restart.
+        from .imd_auth import manager
+        return self._api_token if self._api_token is not None else manager.token()
 
     def is_configured(self) -> bool:
         """True when the API key is present. The JWT (`IMD_API_TOKEN`) is a SECOND, separate credential the
@@ -241,7 +248,21 @@ class IMDObservationProvider(RainfallProvider):
         now = time.monotonic()
         if self._cache is not None and (now - self._cache[0]) < self.CACHE_TTL_S:
             return self._cache[1], self._cache[2]
-        payload, retrieved_at = self._fetch_current_wx(key, self._api_token_now())
+        from .imd_auth import manager
+        managed = self._api_token is None
+        if managed and not manager.usable():
+            # No request is sent when it is certain to fail (nothing configured, or IMD already rejected this
+            # exact token). Rotating the token clears this immediately -- see docs/DEPLOYMENT.md.
+            raise ProviderUnavailable(f"IMD live source unavailable: {manager.status().detail}")
+        token = self._api_token_now()
+        try:
+            payload, retrieved_at = self._fetch_current_wx(key, token)
+        except ProviderUnavailable as ex:
+            if managed and "IMD returned 401" in str(ex):
+                manager.report_auth_failure(token)
+            raise
+        if managed:
+            manager.report_success()
         scen, meta = self._normalize(payload, retrieved_at)
         self._cache = (now, scen, meta)
         return scen, meta
@@ -270,6 +291,18 @@ class IMDObservationProvider(RainfallProvider):
                     f"{self.API_TOKEN_ENV} is wrong or has expired -- re-issue the token.")
         return "IMD returned HTTP 401 with an unrecognised authentication error body."
 
+    def _forbidden_reason(self, body: object) -> str:
+        """IMD's HTTP 403 bodies (observed live 2026-09-18): {"error": "IP address <ip> not authorized"} when the
+        caller's public IP is not bound to the key, and {"error": "Invalid API key"} when the key itself is
+        wrong. The caller's IP is deliberately not echoed (this text reaches the HTTP client)."""
+        msg = str(body.get("error") or body.get("message") or "").strip().lower() if isinstance(body, dict) else ""
+        if "ip address" in msg and "not authorized" in msg:
+            return (f"IMD returned 403 'IP address not authorized': {self.API_KEY_ENV} is bound to a different "
+                    f"public IP than this server's. Generate a key for this server's IP on the IMD portal.")
+        if "invalid api key" in msg:
+            return f"IMD returned 403 'Invalid API key': check {self.API_KEY_ENV}."
+        return "IMD returned HTTP 403 with an unrecognised error body."
+
     def _fetch_current_wx(self, key: str, token: Optional[str]) -> tuple[dict, datetime]:
         import httpx
         # AUTH (resolved -- see the class docstring): the platform requires BOTH an X-API-Key header (the
@@ -293,11 +326,12 @@ class IMDObservationProvider(RainfallProvider):
             with httpx.Client(headers=headers, timeout=self.TIMEOUT_S) as client:
                 r = client.get(url, params={"id": self.station_id})
                 status_code = r.status_code
-                if status_code == 401:
+                if status_code in (401, 403):
+                    explain = self._auth_failure_reason if status_code == 401 else self._forbidden_reason
                     try:
-                        auth_reason = self._auth_failure_reason(r.json())
-                    except Exception:  # noqa: BLE001 -- body wasn't JSON; fall back to the generic 401 text
-                        auth_reason = self._auth_failure_reason(None)
+                        auth_reason = explain(r.json())
+                    except Exception:  # noqa: BLE001 -- body wasn't JSON; fall back to the generic text
+                        auth_reason = explain(None)
                 r.raise_for_status()
                 data = r.json()
         except Exception as ex:  # noqa: BLE001
@@ -327,14 +361,19 @@ class IMDObservationProvider(RainfallProvider):
             raise ProviderUnavailable(f"IMD current_wx 'Last 24 hrs Rainfall' was not numeric: {raw!r}") from ex
 
         station_name = row.get("Station") or f"station {self.station_id}"
-        obs_time = f"{row.get('Date of Observation', '')} {row.get('Time of Observation', '')}".strip()
+        # The reference names the field "Time of Observation" (UTC); the live API (verified 2026-09-18) sends it
+        # as "Time" (e.g. "3" = the 03 UTC synoptic hour). Accept either; the raw value is kept, never reformatted.
+        obs_clock = row.get("Time of Observation", row.get("Time", ""))
+        obs_time = f"{row.get('Date of Observation', '')} {obs_clock}".strip()
+        if obs_clock not in ("", None):
+            obs_time += " UTC"
 
         mean_mm_h = max(0.0, total_24h_mm) / 24.0
         t_s = np.arange(0, HORIZON_S + 1, RAIN_DT_S, dtype=float)
         intensity_mm_h = np.full_like(t_s, mean_mm_h)
 
         note = (f"IMD current_wx, station {station_name} (id {self.station_id}): observed 24h cumulative "
-                f"rainfall = {total_24h_mm:.1f} mm as of {obs_time or 'unknown time'} (station-local). "
+                f"rainfall = {total_24h_mm:.1f} mm as of {obs_time or 'unknown time'}. "
                 f"Forecast intensity is a PERSISTENCE assumption: {total_24h_mm:.1f} mm / 24h = "
                 f"{mean_mm_h:.2f} mm/h, held constant for the 3h forecast window -- this is NOT a radar or "
                 f"NWP nowcast; IMD publishes no quantitative sub-hourly nowcast product via this API (see "
@@ -350,6 +389,11 @@ class IMDObservationProvider(RainfallProvider):
             "retrieved_at": retrieved_at.isoformat(),
             "observed_at": obs_time or None,
             "observation_type": "24h cumulative rainfall (observed)",
+            # The two halves of this input carry DIFFERENT tags; the scenario/meta tag (ESTIMATED) describes
+            # the forecast driver the engine actually consumes. Labels only -- no value changes here.
+            "source_label": "Live IMD observation + 3-hour persistence estimate",
+            "observation_tag": Tag.REAL.value,
+            "forecast_driver_tag": Tag.ESTIMATED.value,
             "observed_rainfall_mm": round(total_24h_mm, 2),
             "persistence_intensity_mm_h": round(mean_mm_h, 3),
             # Exact label the UI must display verbatim -- NEVER "nowcast"/"forecast"/"radar" on their own.
@@ -366,9 +410,9 @@ class IMDObservationProvider(RainfallProvider):
 
 
 class ECMWFForecastProvider(RainfallProvider):
-    """Temporary REAL rainfall FORECAST source: ECMWF numerical weather prediction, fetched from Open-Meteo's
-    free ECMWF endpoint (api.open-meteo.com/v1/ecmwf) -- used while official IMD API access (D-05,
-    docs/LIVE_RAINFALL_AUDIT.md) is still pending. See `docs/ECMWF_OPENMETEO_AUDIT.md` for the full source
+    """REAL rainfall FORECAST source: ECMWF numerical weather prediction, fetched from Open-Meteo's
+    free ECMWF endpoint (api.open-meteo.com/v1/ecmwf). Introduced while IMD API access was pending; IMD
+    access has worked since 2026-09-18 and this remains the forward-looking NWP source. See `docs/ECMWF_OPENMETEO_AUDIT.md` for the full source
     audit this class implements: endpoint, exact fields, temporal resolution, and limitations.
 
     WHAT THIS IS, AND WHAT IT IS NOT
@@ -500,7 +544,7 @@ class ECMWFForecastProvider(RainfallProvider):
                 f"lat={self.lat:.4f} lon={self.lon:.4f} (Hindmata/Dadar pilot bbox centroid). Retrieved "
                 f"{retrieved_at.isoformat()}. Hourly precipitation (mm, sum of the preceding hour = mean "
                 f"mm/h over that hour): {hour_lines}. This is a numerical-weather-prediction FORECAST, not a "
-                f"radar nowcast and not an IMD product -- temporary source while IMD API access is pending, "
+                f"radar nowcast and not an IMD product, "
                 f"see docs/ECMWF_OPENMETEO_AUDIT.md. Hourly values held constant across each hour's 5-min "
                 f"steps (same convention as the 26 July 2005 historical replay).")
         prov = Provenance(Tag.NWP, "Open-Meteo (https://open-meteo.com), ECMWF IFS 0.25 deg forecast model", note)
@@ -555,9 +599,12 @@ class IMDRadarNowcastProvider(RainfallProvider):
     5. LICENCE UNRESOLVED. `copyRightPolicy.php`/`termscondition.php` 404 while `disclaimer.php` asserts IMD
        copyright with no grant; the official supply route (`radarapi.imd.gov.in`, Radar Division) requires an
        account, a written data request and payment. No harvesting has been started, deliberately.
-    6. THE ENGINE COULD NOT INGEST IT ANYWAY (decision D-15). `contracts.RainfallScenario.intensity_mm_h` is
-       `[T]` and `intensity_at()` returns a scalar `float`: rainfall is spatially uniform by construction for
-       every provider, so a gridded radar field has nowhere to go without a contract change.
+    6. ~~THE ENGINE COULD NOT INGEST IT ANYWAY (decision D-15).~~ **NO LONGER TRUE as of 2026-09-14.**
+       `RainfallScenario` now carries an optional `intensity_field_mm_h` `[T, ny, nx]` + `field_grid`,
+       `runoff_fn` accepts a per-cell field, and `engine.run_simulation` routes it through the 2D surface
+       model; `floodnet.rainfall.gridded` handles reprojection/resampling onto the model grid. A gridded
+       radar field now has somewhere to go. **The remaining blockers are 1-5 above -- all of them data
+       access and licensing, none of them architecture.** See D-15 (resolved) and D-16 in docs/DECISIONS.md.
 
     WHAT WOULD BE REQUIRED TO ENABLE IT (all of these, not any of them)
     -------------------------------------------------------------------
@@ -565,8 +612,10 @@ class IMDRadarNowcastProvider(RainfallProvider):
        type, units, grid definition, timestamps -- not a rendered image.
     b. Credentials for it: `IMD_API_KEY` (X-API-Key) AND `IMD_API_TOKEN` (Bearer JWT).
     c. A resolved licence permitting programmatic retrieval and retention for this use.
-    d. A `RainfallScenario` that can carry a gridded field (D-15) if the spatial resolution is to mean
-       anything; until then a radar feed could only be area-averaged, which must be stated if ever done.
+    d. ~~A `RainfallScenario` that can carry a gridded field (D-15)~~ -- **DONE.** Build the scenario with
+       `floodnet.rainfall.gridded.scenario_from_gridded(...)`, which resamples the radar grid onto the model
+       grid and records the effective resolution honestly (it will state plainly if the source cannot resolve
+       structure inside the pilot). `IMERGSatelliteProvider` is a worked example of this exact shape.
     e. Then, and only then: set `IMD_RADAR_ENABLED=1` and implement `_fetch()` in place of the raise below,
        tagging output `Tag.REAL` for a true QPE product or `Tag.ESTIMATED` for anything derived.
 
@@ -646,15 +695,463 @@ class ExternalNowcastProvider(RainfallProvider):
             "the radar integration boundary). No adapter is connected in this build.")
 
 
+class IMERGSatelliteProvider(RainfallProvider):
+    """REAL, CC0-licensed, GRIDDED satellite precipitation for Mumbai: NASA/JAXA GPM **IMERG Early Run V07**.
+
+    This is the first provider in FloodNet that produces a genuine `[T, ny, nx]` spatial rainfall field
+    (via `floodnet.rainfall.gridded`) rather than one number per timestep. It exists because SR-01 asks for
+    gridded, high-resolution rainfall, and because the engine can finally accept a field (decision D-15 was
+    the blocker; the contract now supports it).
+
+    ============================================================================================
+    WHAT THIS IS -- AND, PRECISELY, WHAT IT IS NOT
+    ============================================================================================
+    **It is NOT ground radar, and it is NOT a radar nowcast. Do not label it as either, anywhere.**
+
+    IMERG's half-hourly 0.1 deg grid is built from a constellation of **passive-microwave** sensors plus
+    **geostationary infrared**, morphed in time. A spaceborne radar (the GPM Core Observatory's Dual-frequency
+    Precipitation Radar) enters only *indirectly*: the PMW estimates are intercalibrated to the GPM Combined
+    Radar-Radiometer Analysis (CORRA) product, which is where DPR contributes. The pixels you download are
+    not radar measurements of Mumbai.
+
+    The only honest one-line description, and the one used in this class's provenance note, is:
+    *"satellite passive-microwave/infrared precipitation, intercalibrated against a spaceborne-radar
+    (GPM DPR/CORRA) reference"*. Anything shorter that contains the word "radar" unqualified is misleading.
+
+    ============================================================================================
+    THE RESOLUTION LIMITATION -- STATED UP FRONT, NOT BURIED
+    ============================================================================================
+    IMERG's cell is 0.1 deg. At the pilot's latitude (~19.02 N) that is about **11.1 km north-south and
+    ~10.5 km east-west, i.e. ~117 km2**. The Hindmata/Dadar pilot box (72.835-72.855 E, 19.010-19.030 N) is
+    about **2.4 x 2.55 km ~ 6 km2** and falls **entirely inside the single IMERG cell spanning
+    72.8-72.9 E / 19.0-19.1 N** -- it does not even straddle a cell boundary.
+
+    **Therefore this provider supplies real, correctly-scaled, time-varying rainfall with a verifiable
+    licence and provenance, but ZERO spatial variation across the pilot.** Going from the uniform scalar
+    providers to IMERG is an upgrade in *provenance and temporal realism*, not in spatial detail. The field
+    this provider returns is genuinely a field -- and it is genuinely (near-)constant in space at pilot
+    scale. `gridded.scenario_from_gridded()` detects this automatically and writes it into the scenario's
+    provenance note; that note must not be edited out downstream.
+
+    A second consequence, equally important: at 30-minute, ~11 km resolution IMERG cannot represent the
+    120 mm/h and 190 mm/h convective cores this model is built around -- those are sub-grid and sub-half-hour.
+    The synthetic design storms remain the right tool for stress-testing; IMERG is the observed/baseline mode.
+
+    ============================================================================================
+    ACCESS
+    ============================================================================================
+    Product      GPM_3IMERGHHE.07 (Early Run), 0.1 deg, 30 min, mm/hr, global.
+    Host         https://gpm1.gesdisc.eosdis.nasa.gov/data/GPM_L3/GPM_3IMERGHHE.07/
+    Licence      **CC0** -- NASA's data-use policy: data from a NASA-led mission are licensed CC0 unless
+                 marked otherwise. This is the only rainfall source wired here with a verified open licence.
+    Latency      ~4 h for the Early Run (Late ~12-14 h, Final ~3 months).
+    Credential   A free **Earthdata Login** is required. This provider reads a bearer token from
+                 `EARTHDATA_TOKEN`. With no token it raises `ProviderUnavailable` -- it never substitutes,
+                 estimates, or falls back to another source.
+    Format       HDF5, so parsing needs `h5py`, which is an OPTIONAL dependency (`pip install -e .[imerg]`).
+                 Without it this provider raises `ProviderUnavailable` naming the missing package.
+
+    ============================================================================================
+    VERIFICATION STATUS -- READ BEFORE TRUSTING THE NETWORK PATH
+    ============================================================================================
+    The product, resolution, cadence, licence, host and authentication scheme above were verified against
+    NASA's own pages. **The request path below (directory layout and the IMERG half-hourly filename pattern)
+    follows GES DISC's documented convention but has NOT been executed against the live service, because no
+    Earthdata credential was available in this environment.** It is therefore in exactly the same honest
+    state `IMDObservationProvider` was in before 2026-09-18: implemented and wired, never executed against
+    the real API (the IMD provider has since been verified live; this one has not). The first
+    authenticated run must confirm the filename pattern; `ProviderUnavailable` (not a fabricated value) is
+    the failure mode if it is wrong.
+    """
+
+    TOKEN_ENV = "EARTHDATA_TOKEN"
+    BASE_URL = "https://gpm1.gesdisc.eosdis.nasa.gov/data/GPM_L3/GPM_3IMERGHHE.07"
+    # IMERG half-hourly granule naming, per GES DISC convention. UNVERIFIED against the live service.
+    FILENAME = ("3B-HHR-E.MS.MRG.3IMERG.{ymd}-S{start}-E{end}.{minutes:04d}.V07B.HDF5")
+    PRECIP_DATASET = "/Grid/precipitation"      # [time, lon, lat] in IMERG V07 HDF5
+    LAT_DATASET = "/Grid/lat"
+    LON_DATASET = "/Grid/lon"
+    TIMEOUT_S = 60.0
+
+    def __init__(self, token: Optional[str] = None):
+        self._token = token
+
+    @property
+    def token(self) -> Optional[str]:
+        return self._token if self._token is not None else os.environ.get(self.TOKEN_ENV)
+
+    def is_configured(self) -> bool:
+        return bool(self.token)
+
+    def unavailable_reason(self) -> Optional[str]:
+        if not self.is_configured():
+            return (f"NASA Earthdata credential not configured: set {self.TOKEN_ENV} to a bearer token from "
+                    "https://urs.earthdata.nasa.gov (free registration). GPM IMERG itself is CC0-licensed; "
+                    "the login is an access-tracking requirement, not a paywall.")
+        try:
+            import h5py  # noqa: F401
+        except ImportError:
+            return ("GPM IMERG granules are HDF5; the optional 'h5py' dependency is not installed. "
+                    "Install it with: pip install -e .[imerg]")
+        return None
+
+    def get(self, scenario_id: Optional[str] = None, **kwargs) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        reason = self.unavailable_reason()
+        if reason:
+            raise ProviderUnavailable(reason)
+        grid = kwargs.get("grid")
+        if grid is None:
+            raise ProviderUnavailable(
+                "IMERGSatelliteProvider needs the model grid to resample onto; pass grid=<Terrain.grid>. "
+                "Resampling is the provider's responsibility -- the engine refuses a mismatched field.")
+        horizon_s = int(kwargs.get("horizon_s", HORIZON_S))
+        fields, lons, lats, stamps = self._fetch_fields(horizon_s)
+
+        from .gridded import scenario_from_gridded, describe_effective_resolution
+        t_s = np.arange(0, len(fields) * 1800, 1800, dtype=float)[: len(fields)]
+        eff = describe_effective_resolution(lons, lats, grid)
+        prov = Provenance(
+            Tag.REAL,
+            "NASA/JAXA GPM IMERG Early Run V07 (GPM_3IMERGHHE.07), GES DISC; licence CC0",
+            "Satellite passive-microwave/infrared precipitation, intercalibrated against a spaceborne-radar "
+            "(GPM DPR via the CORRA product) reference. NOT ground radar and NOT a radar nowcast. "
+            f"Native grid 0.1 deg (~{eff['source_pixel_m'][0]/1000:.1f} x {eff['source_pixel_m'][1]/1000:.1f} km "
+            f"at this latitude), 30-min cadence, mm/hr. Retrieved {stamps[0] if stamps else 'n/a'}.")
+        scen = scenario_from_gridded(
+            IMERG_ID, "GPM IMERG satellite precipitation (Early Run V07)", t_s, fields,
+            src_lons=lons, src_lats=lats, grid=grid, provenance=prov,
+            description=("Real, CC0-licensed gridded satellite precipitation over Mumbai. Not radar. At 0.1 deg "
+                         "the whole pilot falls inside one source cell, so this carries no intra-pilot spatial "
+                         "variation -- see the provenance note."))
+        meta = RainfallSourceMeta(
+            source_type="satellite_qpe", source_name="GPM IMERG Early V07 (NASA/JAXA)",
+            timestamp=datetime.now(timezone.utc).isoformat(), forecast_horizon_min=horizon_s // 60,
+            resolution_min=30, data_mode="REAL", provenance=scen.provenance,
+            detail={"product": "GPM_3IMERGHHE.07", "licence": "CC0", "native_resolution_deg": 0.1,
+                    "cadence_min": 30, "is_ground_radar": False, "is_radar_nowcast": False,
+                    "radar_relationship": "PMW estimates intercalibrated to GPM CORRA (DPR) -- indirect only",
+                    "spatial_field": True, "resolves_within_pilot": eff["resolves_within_pilot"],
+                    "pilot_spans_source_pixels": eff["pilot_spans_source_pixels"],
+                    "granule_timestamps": stamps})
+        return scen, meta
+
+    def _fetch_fields(self, horizon_s: int):
+        """Download and parse the IMERG granules covering the last `horizon_s` seconds.
+
+        UNVERIFIED network path -- see the class docstring. Any failure raises ProviderUnavailable; this
+        method never returns a synthesised or partially-filled field."""
+        import httpx, h5py, io
+        from ..config import PILOT_BBOX_LONLAT
+
+        n = max(1, horizon_s // 1800)
+        now = datetime.now(timezone.utc)
+        # IMERG half-hour granules are stamped on :00 and :30 boundaries; walk backwards from the most
+        # recent complete one, allowing for the ~4 h Early-Run latency.
+        anchor = now.replace(minute=0 if now.minute < 30 else 30, second=0, microsecond=0)
+        anchor = anchor.fromtimestamp(anchor.timestamp() - 4 * 3600, tz=timezone.utc)
+        w, s, e, nn = PILOT_BBOX_LONLAT
+        fields, stamps = [], []
+        lons = lats = None
+        headers = {"Authorization": f"Bearer {self.token}"}
+        for k in range(n):
+            t = anchor.fromtimestamp(anchor.timestamp() - (n - 1 - k) * 1800, tz=timezone.utc)
+            minutes = t.hour * 60 + t.minute
+            end_t = t.fromtimestamp(t.timestamp() + 1799, tz=timezone.utc)
+            fname = self.FILENAME.format(ymd=t.strftime("%Y%m%d"), start=t.strftime("%H%M%S"),
+                                         end=end_t.strftime("%H%M%S"), minutes=minutes)
+            url = f"{self.BASE_URL}/{t.strftime('%Y')}/{t.strftime('%j')}/{fname}"
+            try:
+                with httpx.Client(timeout=self.TIMEOUT_S, follow_redirects=True, headers=headers) as c:
+                    r = c.get(url)
+                    r.raise_for_status()
+                    raw = r.content
+            except Exception as ex:
+                raise ProviderUnavailable(
+                    f"GPM IMERG granule request failed ({type(ex).__name__}) for {fname}. Note the request "
+                    "path is UNVERIFIED against the live service -- confirm the GES DISC directory/filename "
+                    "convention and that the Earthdata token is valid.") from None
+            try:
+                with h5py.File(io.BytesIO(raw), "r") as h:
+                    if lons is None:
+                        lons = np.asarray(h[self.LON_DATASET][:], dtype=float)
+                        lats = np.asarray(h[self.LAT_DATASET][:], dtype=float)
+                        li = np.where((lons >= w - 0.3) & (lons <= e + 0.3))[0]
+                        la = np.where((lats >= s - 0.3) & (lats <= nn + 0.3))[0]
+                        if li.size == 0 or la.size == 0:
+                            raise ProviderUnavailable("GPM IMERG grid does not cover the pilot bbox")
+                        self._li, self._la = li, la
+                        lons, lats = lons[li], lats[la]
+                    p = h[self.PRECIP_DATASET]
+                    # IMERG V07 stores precipitation as [time, lon, lat]; transpose to [lat, lon]
+                    arr = np.asarray(p[0, self._li[0]:self._li[-1] + 1, self._la[0]:self._la[-1] + 1],
+                                     dtype=float).T
+                    arr = np.where(arr < 0, 0.0, arr)     # IMERG uses negative fill values for no-data
+            except ProviderUnavailable:
+                raise
+            except Exception as ex:
+                raise ProviderUnavailable(f"GPM IMERG granule parse failed for {fname}: {type(ex).__name__}") from None
+            fields.append(arr)
+            stamps.append(t.isoformat())
+        return fields, lons, lats, stamps
+
+
+class SyntheticSpatialProvider(RainfallProvider):
+    """SYNTHETIC spatially-varying storm -- the test/demo vehicle for the gridded-rainfall pathway.
+
+    Produces a genuine `[T, ny, nx]` field (a Gaussian rain cell tracking across the pilot) so that the full
+    spatial chain -- field -> per-cell runoff -> 2D surface routing -> drainage coupling -> street depth --
+    can be exercised, tested and demonstrated without waiting on a data licence.
+
+    **It is invented. It is not radar, not observed, and not a nowcast.** Its provenance is tagged SYNTHETIC
+    and says so explicitly, exactly like the existing `moderate`/`heavy`/`cloudburst` design storms. The only
+    difference from those is that this one varies in SPACE as well as time. Any UI, API or document that
+    presents it as observed rainfall of any kind is wrong.
+    """
+
+    SCENARIO_ID = SPATIAL_SYNTHETIC_ID
+
+    def get(self, scenario_id: Optional[str] = None, **kwargs) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        grid = kwargs.get("grid")
+        if grid is None:
+            raise ProviderUnavailable(
+                "SyntheticSpatialProvider needs the model grid to build a field on; pass grid=<Terrain.grid>.")
+        horizon_s = int(kwargs.get("horizon_s", HORIZON_S))
+        from .gridded import synthetic_moving_storm
+        scen = synthetic_moving_storm(grid, horizon_s=horizon_s, dt_s=RAIN_DT_S)
+        meta = RainfallSourceMeta(
+            source_type="scenario", source_name=scen.name, timestamp="N/A (invented spatial test storm)",
+            forecast_horizon_min=horizon_s // 60, resolution_min=RAIN_DT_S // 60, data_mode="SYNTHETIC",
+            provenance=scen.provenance,
+            detail={"spatial_field": True, "field_shape": list(scen.intensity_field_mm_h.shape),
+                    "peak_cell_mm_h": float(np.max(scen.intensity_field_mm_h)),
+                    "is_radar": False, "is_observed": False,
+                    "warning": "INVENTED spatial field for testing the gridded pathway; never present as observed"})
+        return scen, meta
+
+
+class IMDVeravaliSRIImageProvider(RainfallProvider):
+    """RADAR_IMAGE_DERIVED_ESTIMATE from IMD's public Mumbai-Veravali DWR Surface Rainfall Intensity image.
+
+    Fetches https://mausam.imd.gov.in/Radar/sri_vrv.gif directly (no page scraping), decodes it with
+    `imd_sri_image` (legend bins, conservative echo mask, tick-fitted georeference -- see that module), and
+    resamples the pilot window onto the model grid, producing a genuine [T, ny, nx] field.
+
+    TIME -- a source-aware horizon, never silently blended (each period is recorded in
+    `detail["forecast_segments"]`):
+      t = 0          the decoded observed frame (RADAR_IMAGE_DERIVED_ESTIMATE).
+      0 < t <= 30'   "Experimental radar-image nowcast" -- ONLY when FloodNet's own frame history holds two
+                     distinct, recent frames and `radar_nowcast.estimate_motion` accepts them; otherwise the
+                     observed frame is simply held (persistence). IMD publishes one frame at a time, so history
+                     accrues only from frames this provider has itself fetched.
+      30' < t        ECMWF NWP (uniform over the pilot, aligned by wall-clock to the frame's observation time)
+                     when the caller supplies it; otherwise persistence of the last radar-based field.
+    None of this is an IMD nowcast.
+
+    FAILURE: any decode doubt, a stale image (older than MAX_AGE_MIN), or too little valid data over the pilot
+    raises ProviderUnavailable. It never substitutes another source or synthetic rain under this label.
+    """
+
+    SCENARIO_ID = IMD_SRI_ID
+    TIMEOUT_S = 30.0
+    CACHE_TTL_S = 300.0          # courtesy: never re-download the ~1.5 MB image more than every 5 min
+    MAX_AGE_MIN = 90.0           # one observed publication latency was ~39 min; older frames are refused
+    MIN_WINDOW_VALID_PCT = 50.0  # below this the pilot is mostly text/lines/unknown pixels -> refuse
+    USER_AGENT = "FloodNet-SIH26085-research/1.0 (academic prototype; low-frequency single-image fetch)"
+
+    def __init__(self, frame_dir=None):
+        self._cache: Optional[tuple[float, bytes, str]] = None     # (monotonic time, bytes, retrieved_at)
+        self._frame_dir = frame_dir
+        self._store = None
+
+    @property
+    def store(self):
+        if self._store is None:
+            from .radar_nowcast import FrameStore
+            self._store = FrameStore(self._frame_dir)
+        return self._store
+
+    def clear_cache(self) -> None:
+        self._cache = None
+
+    def _ecmwf_tail(self):
+        """(intensity_mm_h[T], retrieved_at) from the shared ECMWF provider, or None if it is unavailable --
+        in which case the tail falls back to persistence and says so."""
+        try:
+            scen, meta = _ecmwf_provider.get(ECMWF_ID)
+            return scen.t_s, scen.intensity_mm_h, datetime.fromisoformat(meta.detail["retrieved_at"])
+        except Exception as ex:  # noqa: BLE001 -- the tail is optional; never fail a radar run over it
+            log.info("ECMWF tail unavailable for the radar-derived run (%s); using persistence", type(ex).__name__)
+            return None
+
+    def _fetch(self) -> tuple[bytes, str]:
+        import time
+        now = time.monotonic()
+        if self._cache is not None and now - self._cache[0] < self.CACHE_TTL_S:
+            return self._cache[1], self._cache[2]
+        import httpx
+        from .imd_sri_image import SRI_URL
+        try:
+            with httpx.Client(timeout=self.TIMEOUT_S, headers={"User-Agent": self.USER_AGENT}) as client:
+                r = client.get(SRI_URL)
+                r.raise_for_status()
+                data = r.content
+        except Exception as ex:  # noqa: BLE001
+            log.warning("IMD SRI image fetch failed: %s", ex)
+            raise ProviderUnavailable(
+                f"IMD Mumbai-Veravali SRI image could not be fetched ({type(ex).__name__})") from None
+        retrieved = datetime.now(timezone.utc).isoformat()
+        self._cache = (now, data, retrieved)
+        return data, retrieved
+
+    def get(self, scenario_id: Optional[str] = None, **kwargs) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        sid = scenario_id or IMD_SRI_ID
+        if sid != IMD_SRI_ID:
+            raise KeyError(f"IMDVeravaliSRIImageProvider only serves {IMD_SRI_ID!r}, got {sid!r}")
+        grid = kwargs.get("grid")
+        if grid is None:
+            raise ProviderUnavailable("IMDVeravaliSRIImageProvider needs grid=<Terrain.grid> to resample onto.")
+        horizon_s = int(kwargs.get("horizon_s", HORIZON_S))
+        data, retrieved = self._fetch()
+        return self.from_image(data, grid, horizon_s, retrieved_at=retrieved,
+                               now=kwargs.get("now") or datetime.now(timezone.utc),
+                               store=self.store, tail=self._ecmwf_tail())
+
+    def from_image(self, data: bytes, grid, horizon_s: int, retrieved_at: str, now: datetime,
+                   store=None, tail=None) -> tuple[RainfallScenario, RainfallSourceMeta]:
+        from . import imd_sri_image as sri
+        from . import radar_nowcast as rn
+        from .gridded import scenario_from_gridded
+        try:
+            dec = sri.decode_sri(data)
+        except sri.SRIDecodeError as ex:
+            raise ProviderUnavailable(f"IMD SRI image not decodable without guessing: {ex}") from None
+        age_min = (now - dec.observed_at_utc).total_seconds() / 60.0
+        if age_min > self.MAX_AGE_MIN:
+            raise ProviderUnavailable(f"IMD SRI image is {age_min:.0f} min old (observed "
+                                      f"{dec.observed_at_utc:%Y-%m-%d %H:%M} UTC); refusing a stale radar frame")
+        if age_min < -10:
+            raise ProviderUnavailable("IMD SRI image timestamp is in the future; refusing an unverifiable frame")
+        field2d, _, win = sri.to_model_grid(dec, grid, config.PILOT_BBOX_LONLAT)
+        if win["window_valid_pct"] < self.MIN_WINDOW_VALID_PCT:
+            raise ProviderUnavailable(f"only {win['window_valid_pct']:.0f}% of the SRI pixels over the pilot are "
+                                      "decodable (text/lines/ambiguous colours); refusing to fill the rest")
+        t_s = np.arange(0, horizon_s + 1, RAIN_DT_S, dtype=float)
+        obs = f"{dec.observed_at_utc:%Y-%m-%d %H:%M:%S} UTC"
+        g = dec.georef
+
+        # ---- source-aware horizon: observed frame -> (optional) advection nowcast -> ECMWF / persistence
+        frame = rn.frame_from_decoded(dec, config.PILOT_BBOX_LONLAT)
+        motion = None
+        if store is not None:
+            store.add(frame)                                 # history is always kept; it costs nothing
+            pair = store.latest_pair()
+            # The advection nowcast is OFF unless FLOODNET_RADAR_NOWCAST=1: IMD's feed has not yet supplied two
+            # reliable consecutive scans to verify it against (docs/RADAR_NOWCAST_STATUS.md). Default path =
+            # observed frame + persistence, then ECMWF/persistence.
+            if (os.environ.get("FLOODNET_RADAR_NOWCAST") == "1" and pair is not None
+                    and pair[1].observed_at == frame.observed_at):
+                motion = rn.estimate_motion(*pair)
+        tail_at = None
+        if tail is not None:
+            tail_t, tail_v, tail_ret = tail
+            age_s = max(0.0, (tail_ret - dec.observed_at_utc).total_seconds())
+            tail_at = lambda t: float(np.interp(max(0.0, t - age_s), tail_t, tail_v))   # noqa: E731 wall-clock aligned
+        fields, last_radar = [], field2d
+        for t in t_s:
+            if t == 0:
+                fields.append(field2d)
+            elif t <= rn.MAX_LEAD_S:
+                if motion is not None:
+                    last_radar, _ = sri.window_to_model_grid(rn.advect(frame, motion, t), frame.lons, frame.lats, grid)
+                fields.append(last_radar)
+            elif tail_at is not None:
+                fields.append(np.full_like(field2d, tail_at(t)))
+            else:
+                fields.append(last_radar)
+        lead_min = rn.MAX_LEAD_S // 60
+        segments = [{"from_min": 0, "to_min": 0, "source": "IMD Mumbai-Veravali DWR", "label": "Radar-derived estimate",
+                     "tag": sri.MODE}]
+        segments.append({"from_min": 5, "to_min": lead_min, "source": "IMD Mumbai-Veravali DWR",
+                         "label": rn.LABEL if motion is not None else "Persistence of the observed frame",
+                         "tag": "EXPERIMENTAL_NOWCAST" if motion is not None else Tag.ESTIMATED.value})
+        if horizon_s > rn.MAX_LEAD_S:
+            segments.append({"from_min": lead_min, "to_min": horizon_s // 60,
+                             "source": "ECMWF NWP (Open-Meteo)" if tail_at is not None else "IMD Mumbai-Veravali DWR",
+                             "label": "ECMWF forecast" if tail_at is not None else "Persistence estimate",
+                             "tag": Tag.NWP.value if tail_at is not None else Tag.ESTIMATED.value})
+        if motion is None and tail_at is None:
+            extension = "3-HOUR PERSISTENCE ESTIMATE"
+        else:
+            extension = " + ".join(f"{s['label'].upper()} {s['from_min']}-{s['to_min']} MIN" for s in segments[1:])
+        horizon_note = "; ".join(f"{s['from_min']}-{s['to_min']} min: {s['label']} [{s['source']}]" for s in segments)
+        prov = Provenance(
+            Tag.ESTIMATED, f"IMD Mumbai-Veravali DWR SRI image ({sri.SRI_URL})",
+            f"{sri.MODE}: rainfall-rate bins read from the colours of IMD's public SRI image observed {obs} -- "
+            f"not IMD numerical QPE, not an IMD gridded product, not validated. Legend: {len(dec.legend)} "
+            f"colour bins (0.1 to >={dec.legend[0].lo:.1f} mm/hr, capped); bin midpoints used. Georeference: "
+            f"{g['method']} (tick RMS {g['tick_rms_px']:.2f} px, radar-site check "
+            f"{g['site_vs_crosshair_km']:.2f} km); displayed pixel ~{g['pixel_km'][0]:.2f} km, native radar "
+            f"resolution not published. Forecast horizon by source -- {horizon_note}. "
+            + (f"Nowcast motion: {rn.METHOD}; {motion.speed_kmh:.0f} km/h toward {motion.toward_deg:.0f} deg, "
+               f"correlation {motion.correlation:.2f}, from frames {motion.gap_min:.0f} min apart; experimental, "
+               f"not an IMD nowcast. " if motion is not None else
+               "No sequential-frame motion was available, so no radar nowcast is made. ")
+            + f"Known limits: legend colours shared with the basemap "
+            f"(~23.7-26.2 mm/h) are excluded, so such echoes are missed; values above the cap are held at the cap; "
+            f"georeference is approximate (from the image's own axes); IMD reuse/automated-retrieval terms for "
+            f"the public image are unconfirmed.")
+        scen = scenario_from_gridded(
+            IMD_SRI_ID, "IMD Mumbai-Veravali DWR (radar-derived estimate)", t_s, fields,
+            src_lons=None, src_lats=None, grid=grid, provenance=prov, already_on_model_grid=True,
+            description="Experimental rainfall field decoded from IMD's Mumbai-Veravali DWR SRI image; see the "
+                        "provenance note for which source drives each part of the 3-hour window.")
+        stats = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in dec.stats.items()}
+        widths = [b.hi - b.lo for b in dec.legend[1:]]
+        detail = {
+            "source": "IMD", "mode": sri.MODE, "radar_site": sri.SITE_NAME,
+            "radar_site_lonlat": [sri.SITE_LON, sri.SITE_LAT], "source_url": sri.SRI_URL,
+            "page_url": sri.PAGE_URL, "product": "Surface Rainfall Intensity (SRI)",
+            "image_observed_at_utc": dec.observed_at_utc.isoformat(), "image_age_min": round(age_min, 1),
+            "retrieved_at": retrieved_at, "legend_bins": len(dec.legend),
+            "legend_bin_width_mm_h": [round(min(widths), 2), round(max(widths), 2)],
+            "legend_cap_mm_h": dec.legend[0].lo, "excluded_legend_colours": stats["excluded_legend_colours"],
+            "georeference_method": g["method"], "georeference_tick_rms_px": round(g["tick_rms_px"], 3),
+            "radar_site_check_km": round(g["site_vs_crosshair_km"], 3),
+            "approx_pixel_km": [round(g["pixel_km"][0], 3), round(g["pixel_km"][1], 3)],
+            "native_resolution": "not published by IMD",
+            "confidence": {"echo_pct": stats["echo_pct"], "no_echo_pct": stats["no_echo_pct"],
+                           "unknown_pct": stats["unknown_pct"]},
+            "pilot_window": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in win.items()},
+            "pilot_mean_mm_h": round(float(field2d.mean()), 3), "pilot_max_mm_h": round(float(field2d.max()), 3),
+            "frame_kind": "t=0 observed image frame; t>0 per forecast_segments",
+            "forecast_segments": segments,
+            "nowcast": motion.to_dict() if motion is not None else None,
+            "frames_in_history": len(store) if store is not None else 1,
+            "source_label": "IMD Mumbai-Veravali DWR \u00b7 radar-derived estimate",
+            "observation_tag": sri.MODE, "forecast_driver_tag": Tag.ESTIMATED.value,
+            "forecast_extension_label": extension,
+            "is_official_qpe": False, "is_nowcast": False, "is_imd_nowcast": False,
+            "is_experimental_image_nowcast": motion is not None,
+        }
+        meta = RainfallSourceMeta(
+            source_type="radar_image_derived", source_name="IMD Mumbai-Veravali DWR",
+            timestamp=dec.observed_at_utc.isoformat(), forecast_horizon_min=horizon_s // 60,
+            resolution_min=None, data_mode=Tag.ESTIMATED.value, provenance=scen.provenance, detail=detail)
+        return scen, meta
+
+
 # Module-level singletons: both caching providers keep their last successful fetch internally (see
 # CACHE_TTL_S) so repeated status checks / run requests within one process don't re-hit their upstream API
 # needlessly. list_providers() must always return these SAME instances, not fresh ones, or the cache would
 # never persist across calls.
 _imd_live_provider = IMDObservationProvider()
 _ecmwf_provider = ECMWFForecastProvider()
+_imerg_provider = IMERGSatelliteProvider()
 # Stateless (it fetches nothing and caches nothing), but shared for the same reason: one object identity for
 # the radar boundary everywhere it is reported.
 _imd_radar_provider = IMDRadarNowcastProvider()
+_synthetic_spatial_provider = SyntheticSpatialProvider()
+_imd_sri_provider = IMDVeravaliSRIImageProvider(frame_dir=config.REPO_DIR / "data" / "interim" / "radar_frames")
 
 
 def list_providers() -> dict[str, RainfallProvider]:
@@ -663,7 +1160,7 @@ def list_providers() -> dict[str, RainfallProvider]:
     Keyed by scenario/source id: 'moderate', 'heavy', 'cloudburst' -> the shared `ScenarioProvider`;
     'july2005' -> `HistoricalReplayProvider`; 'live' -> the shared `IMDObservationProvider` (may raise
     `ProviderUnavailable` if `IMD_API_KEY` isn't configured -- that is expected, not an error to hide);
-    'ecmwf' -> the shared `ECMWFForecastProvider` (temporary NWP forecast source, may raise
+    'ecmwf' -> the shared `ECMWFForecastProvider` (NWP forecast source, may raise
     `ProviderUnavailable` if Open-Meteo is unreachable or returns insufficient data);
     'imd_radar' -> the shared `IMDRadarNowcastProvider` (disabled-by-default integration boundary; ALWAYS
     raises `ProviderUnavailable` with an "ACCESS PENDING" reason -- that is its designed behaviour, not a
@@ -678,6 +1175,11 @@ def list_providers() -> dict[str, RainfallProvider]:
     out[LIVE_ID] = _imd_live_provider
     out[ECMWF_ID] = _ecmwf_provider
     out[RADAR_ID] = _imd_radar_provider
+    # Gridded/spatial sources. Both need grid=<Terrain.grid> passed to .get(); without it they raise
+    # ProviderUnavailable rather than guessing a grid.
+    out[IMERG_ID] = _imerg_provider
+    out[SPATIAL_SYNTHETIC_ID] = _synthetic_spatial_provider
+    out[IMD_SRI_ID] = _imd_sri_provider
     out["external_nowcast"] = ExternalNowcastProvider()
     return out
 
@@ -720,8 +1222,11 @@ def provider_status() -> list[dict]:
                      "data_mode": meta.data_mode, "timestamp": meta.timestamp,
                      "resolution_min": meta.resolution_min, "available": True})
 
+    # data_mode is the class of what this source PRODUCES (known without a fetch), so a status consumer never
+    # has to show "unknown" for a source whose nature is established; `available` says whether it can run now.
     live_row: dict = {"id": LIVE_ID, "source_type": "live_observation", "source_name": "IMD (live observation)",
-                       "data_mode": None, "timestamp": None, "resolution_min": None}
+                       "data_mode": Tag.ESTIMATED.value, "timestamp": None, "resolution_min": None,
+                       "status_label": "VERIFIED"}
     if not _imd_live_provider.is_configured():
         live_row.update(available=False, reason=f"{IMDObservationProvider.API_KEY_ENV} not configured")
     elif _imd_live_provider._cache is not None:  # a cached successful fetch exists -- report it, no new call
@@ -733,7 +1238,8 @@ def provider_status() -> list[dict]:
     out.append(live_row)
 
     ecmwf_row: dict = {"id": ECMWF_ID, "source_type": "ecmwf_forecast", "source_name": "ECMWF NWP (Open-Meteo)",
-                        "data_mode": None, "timestamp": None, "resolution_min": None}
+                        "data_mode": Tag.NWP.value, "timestamp": None, "resolution_min": None,
+                        "status_label": "VERIFIED"}
     if _ecmwf_provider._cache is not None:  # a cached successful fetch exists -- report it, no new call
         _, _, meta = _ecmwf_provider._cache
         ecmwf_row.update(available=True, source_name=meta.source_name, data_mode=meta.data_mode,
@@ -743,6 +1249,12 @@ def provider_status() -> list[dict]:
         # possible on demand, not that one has already succeeded this process.
         ecmwf_row.update(available=True, reason="no credentials required; fetched on demand")
     out.append(ecmwf_row)
+
+    out.append({"id": IMD_SRI_ID, "source_type": "radar_image_derived",
+                "source_name": "IMD Mumbai-Veravali DWR (radar-derived estimate)", "data_mode": "ESTIMATED",
+                "timestamp": None, "resolution_min": None, "available": True,
+                "status_label": "RADAR-DERIVED ESTIMATE",
+                "reason": "public IMD image; fetched and decoded on demand"})
 
     # IMD radar: listed so the honest answer to "where is radar?" is visible in the API rather than absent,
     # and permanently available=False. `unavailable_reason()` is a pure string computation -- no network

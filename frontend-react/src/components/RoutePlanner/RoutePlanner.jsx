@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import { fmt } from '../../lib/format.js'
 import { buildLocationIndex, searchLocations, findLocationByCoords, PILOT_AREAS } from '../../lib/locations.js'
+import { exposureOf } from '../../lib/routeExposure.js'
 import styles from './RoutePlanner.module.css'
 
 // Matches the backend's VEHICLE_LIMIT_CM keys (see lib/severity.js / config.py).
@@ -27,7 +28,7 @@ function fmtLonLat(lonlat) {
 // Labels must stay honest about what each objective actually measures: "fastest" is DISTANCE only -- there
 // is no travel-time/speed model anywhere in the graph (see backend/floodnet/routing/router.py), so it must
 // never read just "Fastest" anywhere in this UI.
-const OBJECTIVE_LABEL = { safest: 'Safest', fastest: 'Fastest (by distance)', balanced: 'Balanced' }
+const OBJECTIVE_LABEL = { safest: 'Lowest flood-risk', fastest: 'Shortest (by distance)', balanced: 'Balanced' }
 
 // FROM/TO search box: a plain text input (also still accepts a typed "lon,lat") plus a live-filtered
 // dropdown of real pilot locations (named OSM roads + the 4 pilot landmarks -- see lib/locations.js). Kept
@@ -178,8 +179,13 @@ export default function RoutePlanner() {
   const altEvalT = altResult?.t_min != null ? altResult.t_min : currentT
 
   return (
-    <section className={styles.section}>
-      <div className="panel-heading">Emergency Route Assessment</div>
+    <section className={styles.section} data-tour="panel-route">
+      <div className={styles.headRow}>
+        <div className="panel-heading">Emergency Route</div>
+        <span className={`tag-badge tag-ESTIMATED ${styles.capBadge}`} title="Traffic conditions are not included.">
+          FLOOD-RISK ROUTING
+        </span>
+      </div>
 
       <div className={styles.field}>
         <label className="field-label" htmlFor="rp-vehicle">
@@ -216,15 +222,11 @@ export default function RoutePlanner() {
         onSelect={handleSelectDest}
         selectedLabel={destMatch ? `Selected: ${destMatch.name}` : route.dest ? `Selected: ${fmtLonLat(route.dest)}` : null}
       />
-      <div className={styles.hint}>
-        Search covers named streets and landmarks in the Hindmata/Dadar pilot area only (real OSM/MCGM data —
-        no results outside the pilot). You can also click the map twice to pick From/To, or type coordinates
-        as "lon,lat" directly.
-      </div>
+      <div className={styles.hint}>Search a pilot street or landmark, or click the map twice.</div>
 
-      <div className={styles.buttons}>
+      <div className={styles.buttons} data-tour="route-controls">
         <button className="btn btn-primary btn-block" onClick={handleFind} disabled={route.loading}>
-          {route.loading ? 'Evaluating route…' : `Assess safe route at T+${currentT} min`}
+          {route.loading ? 'Evaluating route…' : `Assess lower flood-risk route at T+${currentT} min`}
         </button>
         <button className="btn" onClick={handleClear}>
           Clear
@@ -253,7 +255,7 @@ export default function RoutePlanner() {
       {unreachable && (
         <div className={styles.alertUnsafe} role="alert">
           <div className={styles.alertHeader}>
-            <span className={styles.alertBadge}>NO SAFE ROUTE</span>
+            <span className={styles.alertBadge}>NO PASSABLE ROUTE</span>
             <span className={styles.alertTime}>ASSESSED AT T+{evalT} MIN</span>
           </div>
           <div className={styles.alertBody}>
@@ -264,17 +266,50 @@ export default function RoutePlanner() {
       )}
 
       {reachableResult && (
-        <div className={styles.resultBox}>
+        <div className={styles.resultBox} data-tour="route-result">
+          <div className={styles.odRow}>
+            <span className={styles.odEnd}>{originMatch?.name || fmtLonLat(route.origin) || 'Origin'}</span>
+            <span className={styles.odArrow} aria-hidden="true">→</span>
+            <span className={styles.odEnd}>{destMatch?.name || fmtLonLat(route.dest) || 'Destination'}</span>
+          </div>
           <div className={styles.resultHeader}>
-            <span className={styles.safeBadge}>SAFE ROUTE AT T+{evalT} MIN</span>
+            <span className={styles.safeBadge}>LOWER FLOOD-RISK ROUTE · T+{evalT} MIN</span>
             {result.max_depth_on_route_cm != null && result.vehicle_limit_cm != null && (
               <span className={styles.decisionRule}>
                 {Math.round(result.max_depth_on_route_cm)} cm / {Math.round(result.vehicle_limit_cm)} cm max
               </span>
             )}
           </div>
+          {(() => {
+            const direct = exposureOf(result.baseline_max_depth_cm, result.vehicle_limit_cm)
+            const chosen = exposureOf(result.max_depth_on_route_cm, result.vehicle_limit_cm)
+            if (!direct || !chosen) return null
+            const same = detourM == null || detourM <= 5
+            return (
+              <div className={styles.compare}>
+                <div className={styles.compareRow}>
+                  <span className={styles.compareName}>A · Direct route</span>
+                  <span className={styles.compareMeta}>{fmt(result.baseline_length_m, 0)} m · {fmt(result.baseline_max_depth_cm, 0)} cm</span>
+                  <span className={`${styles.expo} ${styles[`expo_${direct.tone}`]}`}>Flood exposure: {direct.label}</span>
+                </div>
+                <div className={`${styles.compareRow} ${styles.compareRowOn}`}>
+                  <span className={styles.compareName}>B · {same ? 'Same path' : 'Alternative'}</span>
+                  <span className={styles.compareMeta}>{fmt(result.length_m, 0)} m · {fmt(result.max_depth_on_route_cm, 0)} cm</span>
+                  <span className={`${styles.expo} ${styles[`expo_${chosen.tone}`]}`}>Flood exposure: {chosen.label}</span>
+                </div>
+                <div className={styles.compareWhy}>
+                  <strong>Why:</strong>{' '}
+                  {same
+                    ? 'the direct route is already within this vehicle’s depth limit.'
+                    : avoided.length > 0
+                      ? `avoids ${avoided.length} segment${avoided.length > 1 ? 's' : ''} above the ${Math.round(result.vehicle_limit_cm)} cm limit${avoidedNames[0] ? ` (${avoidedNames.slice(0, 2).join(', ')})` : ''}.`
+                      : 'passes through shallower forecast water than the direct route.'}
+                </div>
+              </div>
+            )
+          })()}
           <div className={styles.resultRow}>
-            <span className={styles.resultLabel}>Safe route distance</span>
+            <span className={styles.resultLabel}>Route distance</span>
             <span className={styles.resultValue}>{fmt(result.length_m, 0)} m</span>
           </div>
           <div className={styles.resultRow}>
@@ -303,10 +338,6 @@ export default function RoutePlanner() {
               )}
             </span>
           </div>
-          <div className={styles.trafficNote}>
-            Ranked by flood risk (forecast street depth) + vehicle depth clearance from the actual road
-            network. <strong>Traffic data: not connected</strong> — no live congestion feed is used.
-          </div>
         </div>
       )}
 
@@ -329,18 +360,16 @@ export default function RoutePlanner() {
             <span className={alternativesStale ? styles.staleBadge : styles.safeBadge}>
               {candidates.length} ROUTE OPTIONS AT T+{altEvalT} MIN
             </span>
-            {alternativesStale && <span className={styles.staleTime}>DASHBOARD NOW AT T+{currentT} MIN</span>}
           </div>
           {/* Alternatives are never auto-recomputed on scrub (deliberate -- too costly), so once the
               timeline moves they disagree with everything else on screen. Say so explicitly rather than
               letting an old result keep the styling of a fresh one. */}
           {alternativesStale && (
-            <div className={styles.staleNotice} role="alert">
-              <strong>Out of date.</strong> These options were computed at T+{altEvalT} min; the dashboard is
-              now at T+{currentT} min. The route geometry (dashed on the map), the distances and the
-              max-depth figures below are all from T+{altEvalT} min. Click{' '}
-              <em>Recompute options at T+{currentT} min</em> to refresh. The safe-through / unsafe-by line on
-              each option scans the full forecast horizon, so it stays valid.
+            <div className={styles.snapshotBar} role="status">
+              <span>Route snapshot: T+{altEvalT}</span>
+              <button type="button" className={styles.snapshotBtn} onClick={handleCompare} disabled={alternatives.loading}>
+                {alternatives.loading ? 'Updating…' : `Update for T+${currentT}`}
+              </button>
             </div>
           )}
           {candidates.map((c, i) => {
@@ -362,10 +391,6 @@ export default function RoutePlanner() {
               </button>
             )
           })}
-          <div className={styles.trafficNote}>
-            "Fastest" is distance-only — no travel-time or traffic model exists.{' '}
-            <strong>Traffic data: not connected</strong> — no live congestion feed is used.
-          </div>
         </div>
       )}
     </section>

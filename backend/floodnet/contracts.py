@@ -53,24 +53,92 @@ class Terrain:
 # ----------------------------------------------------------------------------- rainfall
 @dataclass
 class RainfallScenario:
+    """Rainfall forcing for one run.
+
+    TWO MODES, and the distinction is load-bearing for SR-01:
+
+    - **Uniform (default).** `intensity_mm_h` is `[T]`; the same mm/h is applied to every cell of the model
+      grid. Every provider that predates spatial support is this mode, and it stays bit-for-bit unchanged.
+    - **Spatial.** `intensity_field_mm_h` is `[T, ny, nx]` ON `field_grid`, which MUST equal the Terrain grid
+      the engine is run against (resampling/reprojection is the *provider's* job, not the engine's -- see
+      `floodnet.rainfall.gridded`). `intensity_mm_h` is STILL populated in this mode, as the per-timestep
+      **area mean** of the field, so that every existing scalar consumer (`to_dict`, the `/api/scenarios`
+      payload, the SWMM adapter, frontend charts) keeps working unchanged and honestly. Anything reading
+      `intensity_mm_h` on a spatial scenario is reading an area mean, and `to_dict()` says so via `spatial`.
+
+    `is_spatial` is the single predicate callers should branch on. A scenario is never *implicitly* spatial:
+    a provider must supply both `intensity_field_mm_h` and `field_grid`.
+    """
     id: str
     name: str
     t_s: np.ndarray                  # [T] seconds from start, monotonically increasing, step RAIN_DT_S
     intensity_mm_h: np.ndarray       # [T] mm/h, piecewise-constant from t_s[k] to t_s[k+1]
+                                     #     (spatial mode: the area MEAN of intensity_field_mm_h per timestep)
     provenance: Provenance
     description: str = ""
+    # --- spatial mode (optional; both must be set together, or neither) -------------------------------
+    intensity_field_mm_h: Optional[np.ndarray] = None   # [T, ny, nx] mm/h on `field_grid`
+    field_grid: Optional[Grid] = None                   # grid the field is on; must match Terrain.grid
+
+    def __post_init__(self):
+        if (self.intensity_field_mm_h is None) != (self.field_grid is None):
+            raise ValueError("RainfallScenario: intensity_field_mm_h and field_grid must be set together")
+        if self.intensity_field_mm_h is not None:
+            f = np.asarray(self.intensity_field_mm_h)
+            if f.ndim != 3:
+                raise ValueError(f"intensity_field_mm_h must be [T, ny, nx]; got shape {f.shape}")
+            if f.shape[0] != len(self.t_s):
+                raise ValueError(f"intensity_field_mm_h has {f.shape[0]} timesteps but t_s has {len(self.t_s)}")
+            if (f.shape[1], f.shape[2]) != (self.field_grid.ny, self.field_grid.nx):
+                raise ValueError(f"intensity_field_mm_h grid {f.shape[1:]} != field_grid "
+                                 f"({self.field_grid.ny}, {self.field_grid.nx})")
+
+    @property
+    def is_spatial(self) -> bool:
+        return self.intensity_field_mm_h is not None
+
+    def _index_at(self, t: float) -> int:
+        """Piecewise-constant lookup index for time t, or -1 if outside the series."""
+        k = int(np.searchsorted(self.t_s, t, side="right") - 1)
+        if k < 0 or k >= len(self.intensity_mm_h):
+            return -1
+        return k
 
     def intensity_at(self, t: float) -> float:
-        k = int(np.searchsorted(self.t_s, t, side="right") - 1)
+        """Scalar mm/h at time t. In spatial mode this is the AREA MEAN over the field -- use
+        intensity_field_at() to get the actual per-cell field."""
+        k = self._index_at(t)
         if k < 0: return 0.0
-        if k >= len(self.intensity_mm_h): return 0.0
         return float(self.intensity_mm_h[k])
 
+    def intensity_field_at(self, t: float) -> Optional[np.ndarray]:
+        """[ny, nx] mm/h at time t, or None for a uniform scenario. Returns a read-only view: the engine
+        must not mutate the stored field."""
+        if self.intensity_field_mm_h is None:
+            return None
+        k = self._index_at(t)
+        if k < 0:
+            return np.zeros((self.field_grid.ny, self.field_grid.nx), dtype=np.float64)
+        f = self.intensity_field_mm_h[k]
+        view = f.view()
+        view.flags.writeable = False
+        return view
+
     def to_dict(self) -> dict:
-        return {"id": self.id, "name": self.name, "description": self.description,
-                "t_min": (self.t_s / 60).tolist(), "intensity_mm_h": self.intensity_mm_h.tolist(),
-                "total_mm": float(np.sum(self.intensity_mm_h * np.diff(np.append(self.t_s, self.t_s[-1] + 300)) / 3600.0)),
-                "provenance": self.provenance.to_dict()}
+        d = {"id": self.id, "name": self.name, "description": self.description,
+             "t_min": (self.t_s / 60).tolist(), "intensity_mm_h": self.intensity_mm_h.tolist(),
+             "total_mm": float(np.sum(self.intensity_mm_h * np.diff(np.append(self.t_s, self.t_s[-1] + 300)) / 3600.0)),
+             "provenance": self.provenance.to_dict(),
+             "spatial": self.is_spatial}
+        if self.is_spatial:
+            # The field itself is far too large for a JSON payload (T x ny x nx floats); advertise its shape
+            # and grid so a client can tell this is a genuine spatial field, and state plainly that the
+            # scalar series above is an area mean.
+            f = np.asarray(self.intensity_field_mm_h)
+            d["field"] = {"shape": list(f.shape), "grid": self.field_grid.to_dict(), "units": "mm/h",
+                          "note": "intensity_mm_h above is the per-timestep AREA MEAN of this field",
+                          "peak_cell_mm_h": float(np.max(f)), "min_cell_mm_h": float(np.min(f))}
+        return d
 
 
 # ----------------------------------------------------------------------------- drainage network

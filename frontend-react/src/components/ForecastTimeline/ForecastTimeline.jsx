@@ -119,8 +119,12 @@ export default function ForecastTimeline() {
     setPlaying(!playing)
   }
 
+  // Modelled max street depth at the selected time (same series the chart draws), for the clock readout.
+  const iNow = series?.t_min?.indexOf(currentT) ?? -1
+  const depthNow = iNow >= 0 && Number.isFinite(series?.max_depth_cm?.[iNow]) ? Math.round(series.max_depth_cm[iNow]) : null
+
   return (
-    <div className={`${styles.bar} glass-panel`}>
+    <div className={`${styles.bar} glass-panel`} data-tour="timeline">
       <button
         className={`btn btn-primary ${styles.playBtn}`}
         onClick={handlePlay}
@@ -153,11 +157,6 @@ export default function ForecastTimeline() {
                   </span>
                 )}
               </div>
-            )}
-            {rainData.total > 0 && (
-              <span className={styles.rainSummary}>
-                {Math.round(rainData.total)} mm total &middot; {Math.round(rainData.imax)} mm/h peak rain
-              </span>
             )}
           </div>
         </div>
@@ -207,12 +206,12 @@ export default function ForecastTimeline() {
                       x2={peak.x}
                       y1={peak.y}
                       y2={H}
-                      stroke="#2563eb"
+                      stroke="#C4273D"
                       strokeWidth="1.2"
                       strokeDasharray="3 3"
-                      opacity="0.75"
+                      opacity="0.8"
                     />
-                    <circle cx={peak.x} cy={peak.y} r="3.5" fill="#2563eb" stroke="#ffffff" strokeWidth="1.5" />
+                    <circle cx={peak.x} cy={peak.y} r="4" fill="#C4273D" stroke="#ffffff" strokeWidth="1.5" />
                   </g>
                 )}
 
@@ -223,7 +222,7 @@ export default function ForecastTimeline() {
               <div className={styles.futureShade} style={{ width: `${Math.max(0, 100 - (cursorX / W) * 100)}%` }} />
             </>
           ) : (
-            <div className={styles.empty}>Execute a forecast scenario to view the 0&ndash;180 min timeline</div>
+            <div className={styles.empty}>Run a forecast to view the 0&ndash;180 min timeline</div>
           )}
         </div>
 
@@ -259,9 +258,9 @@ export default function ForecastTimeline() {
           {!run
             ? 'No active run'
             : currentT === 0
-              ? 'T+0 (Baseline dry)'
-              : currentT >= 60
-                ? `${Math.floor(currentT / 60)}h ${String(currentT % 60).padStart(2, '0')}m elapsed`
+              ? 'Start of forecast'
+              : depthNow != null
+                ? `${depthNow} cm max depth`
                 : `${currentT} min elapsed`}
         </div>
       </div>

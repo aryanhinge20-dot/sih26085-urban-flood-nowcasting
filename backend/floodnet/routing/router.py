@@ -163,8 +163,10 @@ def safe_route(roads: RoadGraph, street_depth_m: dict[str, float], origin_lonlat
         geom, length, segs, max_depth = None, None, [], None
 
     avoided = [s for s in base_segs if depth_cm_of.get(s, 0.0) >= limit]
+    base_max = max([depth_cm_of.get(s, 0.0) for s in base_segs], default=0.0) if base_path else None
     return {"route": geom, "length_m": length, "max_depth_on_route_cm": max_depth, "route_segments": segs,
             "avoided_segments": avoided, "baseline_route": base_geom, "baseline_length_m": base_len,
+            "baseline_max_depth_cm": base_max, "baseline_segments": base_segs,
             "reachable": reachable, "vehicle": vehicle, "vehicle_limit_cm": limit,
             "origin_node": o, "dest_node": d,
             "provenance": {"roads": roads.provenance.to_dict(), "flood_weights": "derived from simulation frame"}}

@@ -121,7 +121,10 @@ def test_provider_status_never_reports_external_nowcast_active():
         # "radar_nowcast" is the IMD radar integration boundary: listed, but permanently available=False
         # (asserted below) -- it is never reported as an active source. "external_nowcast" is never listed.
         assert entry["source_type"] in ("scenario", "historical_replay", "live_observation",
-                                        "ecmwf_forecast", "radar_nowcast")
+                                        "ecmwf_forecast", "radar_nowcast", "radar_image_derived")
+        # the experimental SRI-image source is an ESTIMATE, never a nowcast and never REAL
+        if entry["source_type"] == "radar_image_derived":
+            assert entry["data_mode"] == "ESTIMATED" and "nowcast" not in entry["source_name"].lower()
         assert entry["source_type"] != "external_nowcast"
     ids = {e["id"] for e in status}
     assert {"moderate", "heavy", "cloudburst", "july2005", "live", "ecmwf"} <= ids
@@ -531,3 +534,34 @@ def test_existing_providers_unaffected_by_ecmwf_wiring():
     assert scen2.id == "july2005" and meta2.source_type == "historical_replay"
     with pytest.raises(NotImplementedError):
         ExternalNowcastProvider().get()
+
+
+def test_imd_provider_keeps_observation_time_from_live_time_field(monkeypatch):
+    """The live API (verified 2026-09-18) sends the observation hour as "Time", not the documented
+    "Time of Observation". It must be preserved (and labelled UTC per the IMD reference), not dropped."""
+    row = _imd_sample_row("8.4")
+    del row["Time of Observation"]
+    row["Time"] = "3"
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [row]))
+    scen, meta = IMDObservationProvider(api_key="k", api_token="t").get()
+    assert meta.detail["observed_at"] == "2026-09-09 3 UTC"
+    assert "2026-09-09 3 UTC" in scen.provenance.note
+    assert "station-local" not in scen.provenance.note
+
+
+def test_imd_provider_documented_time_field_still_supported(monkeypatch):
+    _patch_httpx_client(monkeypatch, _FakeResponse(200, [_imd_sample_row()]))
+    _, meta = IMDObservationProvider(api_key="k", api_token="t").get()
+    assert meta.detail["observed_at"] == "2026-09-09 05:30:00 UTC"
+
+
+def test_imd_provider_403_bodies_are_explained_without_echoing_the_ip(monkeypatch):
+    cases = {"IP address 203.0.113.7 not authorized": "not authorized",
+             "Invalid API key": "invalid api key"}
+    for body, expected in cases.items():
+        _patch_httpx_client(monkeypatch, _FakeResponse(403, {"error": body}))
+        with pytest.raises(ProviderUnavailable) as exc:
+            IMDObservationProvider(api_key="k", api_token="t").get()
+        msg = str(exc.value)
+        assert expected in msg.lower() and "IMD_API_KEY" in msg, msg
+        assert "203.0.113.7" not in msg

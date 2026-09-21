@@ -1,34 +1,24 @@
-import { useFloodNet, LIVE_ID, ECMWF_ID } from '../../state/FloodNetContext.jsx'
+import { useFloodNet } from '../../state/FloodNetContext.jsx'
+import { activeSource } from '../../lib/sources.js'
 import LocationSelector from '../LocationSelector/LocationSelector.jsx'
 import styles from './Header.module.css'
 
-function deriveDataSourceText({ run, isStale, scenarioId, currentScenario }) {
-  if (run && !isStale) {
-    const runSourceType = run?.provenance?.rainfall_source?.source_type
-    if (runSourceType === 'live_observation') return 'IMD live observation'
-    if (runSourceType === 'ecmwf_forecast')   return 'ECMWF NWP forecast'
-    if (run.scenario_id === 'july2005')       return 'July 2005 replay'
-    if (run.scenario_id === 'cloudburst')     return 'Cloudburst scenario'
-    return run.scenario_name ? `${run.scenario_name} (Run)` : 'Synthetic scenario'
-  }
-
-  // When no simulation has been run yet for this scenario, or inputs changed:
-  if (scenarioId === LIVE_ID)               return 'IMD live observation (unrun)'
-  if (scenarioId === ECMWF_ID)              return 'ECMWF NWP forecast (unrun)'
-  if (currentScenario?.id === 'july2005')   return 'July 2005 replay (unrun)'
-  if (currentScenario?.name)                return `${currentScenario.name} (unrun)`
-  return 'Scenario not run'
+// The header names the rainfall source that is ACTUALLY active (lib/sources.js): the completed run's own
+// source while its inputs are current, otherwise the current selection marked as not yet run.
+function deriveDataSourceText(opts) {
+  const src = activeSource(opts)
+  return src.ran ? src.name : `${src.name} · not run`
 }
 
 function statusLabel(opts) {
   const { bootLoading, bootError, simulating, simError, isStale, run } = opts
   if (bootLoading) return 'Connecting'
   if (bootError)   return 'Offline'
-  if (simulating)  return 'Computing forecast…'
-  if (simError)    return 'Simulation failed'
-  if (isStale)     return 'Inputs changed — Run forecast'
+  if (simulating)  return 'Running'
+  if (simError)    return 'Error'
+  if (isStale)     return 'Inputs changed'
   if (!run)        return 'Ready'
-  return 'Forecast ready'
+  return 'Complete'
 }
 
 export default function Header({ onToggleHome, isHomeActive }) {
@@ -103,7 +93,7 @@ export default function Header({ onToggleHome, isHomeActive }) {
 
         <div className={styles.metaBlock}>
           <span className={styles.metaLabel}>Data Source</span>
-          <span className={styles.metaValue}>{dataSourceText}</span>
+          <span className={styles.metaValue} title={dataSourceText}>{dataSourceText}</span>
         </div>
 
         <div className={styles.metaDivider} aria-hidden="true" />

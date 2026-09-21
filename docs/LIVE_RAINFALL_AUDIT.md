@@ -378,3 +378,18 @@ EXTENSION directly rather than parsing them out of the prose provenance note.
 **Not done, still correctly out of scope:** SR-02 is not claimed as newly/fully satisfied by the persistence
 estimate (§6 stands unchanged) — the dashboard's own copy says "3-hour persistence estimate", never
 "forecast" or "nowcast", exactly to avoid that overclaim.
+
+## 12. 2026-09-18 — authenticated IMD API access verified
+
+- **Auth chain (observed responses, credentials never printed):** no key → 401 "API key missing"; key only →
+  401 "Authorization header missing or invalid"; key + bad JWT → 401 "Invalid or expired JWT token"; bad key +
+  valid JWT → 403 "Invalid API key"; valid key + JWT from an unbound IP → 403 "IP address … not authorized".
+  The provider maps each of these to a specific diagnostic without echoing the IP or any credential.
+- **Working endpoints (HTTP 200, Mumbai rows):** `current_wx` (43003 Mumbai-Santacruz, 43057 Mumbai-Colaba),
+  `stationnowcast` (only "Navi Mumbai" matches), `districtnowcast` (151 MUMBAI CITY, 157 MUMBAI SUBURBAN),
+  `districtrainfall` (151/157, daily mm).
+- **Field-name correction:** the live `current_wx` sends the observation hour as `Time`, not the documented
+  `Time of Observation`; the provider accepts both and labels the time UTC (per the reference).
+- **The JWT expires** (observed: valid, then "Invalid or expired JWT token" within ~2 h). Renew it in the portal;
+  live smoke tests are opt-in via `RUN_LIVE_IMD=1` so an expired token never fails the offline suite.
+- **Radar:** the portal has no radar-product API (see `docs/RADAR_SRI_IMAGE.md` for the image-derived path).

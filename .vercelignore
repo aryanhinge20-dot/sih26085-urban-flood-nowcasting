@@ -1,0 +1,12 @@
+# Vercel builds the static frontend only (see docs/DEPLOYMENT.md). Keep secrets and the Python side out.
+.env
+.env.*
+!.env.example
+backend/
+data/
+docs/
+research/
+frontend/
+frontend-react/node_modules/
+frontend-react/dist/
+**/__pycache__/

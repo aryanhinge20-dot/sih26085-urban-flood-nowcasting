@@ -286,3 +286,81 @@
 .candidateMetricsStale {
   color: var(--text-faint);
 }
+
+/* ORIGIN -> DESTINATION and the A/B flood-exposure comparison (values straight from /api/route) */
+.odRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  min-width: 0;
+}
+.odEnd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.odArrow { color: var(--accent); flex: 0 0 auto; }
+
+.compare {
+  margin: 8px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+.compareRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 6px 8px;
+  font-size: 10.5px;
+}
+.compareRow + .compareRow { border-top: 1px solid var(--border); }
+.compareRowOn { background: rgba(31, 138, 76, 0.06); }
+.compareName { font-weight: 700; color: var(--text); }
+.compareMeta { font-family: var(--mono); color: var(--text-dim); text-align: right; }
+.expo { grid-column: 1 / -1; font-family: var(--mono); font-size: 9.5px; font-weight: 700; letter-spacing: 0.3px; }
+.expo_high { color: var(--sev-critical); }
+.expo_mod { color: #b45309; }
+.expo_low { color: #1f8a4c; }
+.compareWhy {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.headRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.capBadge { cursor: help; flex: 0 0 auto; }
+
+/* a route result always names its forecast time; an older one offers a one-click update */
+.snapshotBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid rgba(180, 83, 9, 0.35);
+  background: rgba(180, 83, 9, 0.07);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: #92400e;
+}
+.snapshotBtn {
+  border: 1px solid rgba(180, 83, 9, 0.45);
+  background: #fff;
+  color: #92400e;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+.snapshotBtn:disabled { opacity: 0.6; cursor: default; }

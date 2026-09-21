@@ -7,14 +7,14 @@ import styles from './WhyFloodedPanel.module.css'
 // Mirrors the backend's `dominant_cause` enum (backend/floodnet/api/main.py's /explain endpoint) 1:1.
 const CAUSE_SENTENCES = {
   drainage_overcapacity:
-    'The nearest drainage node is surcharging -- inflow exceeds its hydraulic capacity, so it can no longer drain the water it captures. This is a local hydraulic signal near this location, not a computed flow path to this specific street.',
+    'Nearby drainage network is over capacity: the nearest node is surcharging.',
   drainage_blockage:
-    'The nearest drainage node is surcharging -- an outgoing pipe is blocked, so it can no longer drain the water it captures. This is a local hydraulic signal near this location, not a computed flow path to this specific street.',
+    'Nearby drainage network is restricted: the nearest node is surcharging behind a blocked pipe (what-if scenario).',
   drainage_downstream_backup:
-    'The nearest drainage node is surcharging -- downstream capacity is limiting outflow (backwater), so it can no longer drain the water it captures. This is a local hydraulic signal near this location, not a computed flow path to this specific street.',
+    'Nearby drainage network is backing up: downstream capacity is limiting outflow at the nearest node.',
   surface_ponding_only:
-    'Surface runoff is accumulating faster than local drainage inlets can capture water, causing depression ponding without node surcharge.',
-  unknown: 'No clear dominant cause could be attributed from the current simulation state.',
+    'Surface water is ponding here; the nearest drainage node is not surcharging.',
+  unknown: 'No single dominant factor stands out at this timestep.',
 }
 
 export function explainSentence(explain) {
@@ -301,15 +301,15 @@ export default function WhyFloodedPanel() {
   )
 
   return (
-    <section className={styles.section}>
+    <section className={styles.section} data-tour="panel-why">
       <div className="panel-heading">Why this area floods</div>
 
       {!selectedSegId ? (
-        <div className={styles.hint}>Click any flooded street on the map to inspect its causal chain.</div>
+        <div className={styles.hint}>Select a street on the map to see its surface water and drainage state.</div>
       ) : explainError ? (
         <div className={styles.errBox}>{explainError}</div>
       ) : explainLoading && !explain ? (
-        <div className={styles.loading}>Analyzing hydrodynamic factors&hellip;</div>
+        <div className={styles.loading}>Loading&hellip;</div>
       ) : explain ? (
         <div className={styles.body}>
           <div className={styles.headRow}>
@@ -327,6 +327,14 @@ export default function WhyFloodedPanel() {
                 {explain.depth_cm > 0 ? `${fmt(explain.depth_cm, 1)} cm` : 'No street flooding (0.0 cm)'}
               </span>
             </div>
+            {explain.timing && (
+              <div className={styles.depthContextItem}>
+                <span className={styles.depthContextLabel}>ONSET</span>
+                <span className={styles.depthContextVal}>
+                  {explain.timing.onset_t_min != null ? `T+${Math.round(explain.timing.onset_t_min)}m` : 'Not reached'}
+                </span>
+              </div>
+            )}
             {segPeak && (
               <div className={styles.depthContextItem}>
                 <span className={styles.depthContextLabel}>FORECAST PEAK</span>
@@ -341,7 +349,7 @@ export default function WhyFloodedPanel() {
 
           {/* Primary Human Explanation */}
           <div className={styles.explanationBox}>
-            <div className={styles.explanationTitle}>Attributed Factor</div>
+            <div className={styles.explanationTitle}>Model summary</div>
             <p className={styles.sentence}>{explainSentence(explain)}</p>
           </div>
 
@@ -378,8 +386,8 @@ export default function WhyFloodedPanel() {
                     ))}
                   </div>
                 )}
-                {c.note && <div className={styles.contribNote}>{c.note}</div>}
-                {c.disclaimer && <div className={styles.proximityNote}>{c.disclaimer}</div>}
+                {showEvidence && c.note && <div className={styles.contribNote}>{c.note}</div>}
+                {showEvidence && c.disclaimer && <div className={styles.proximityNote}>{c.disclaimer}</div>}
               </li>
             ))}
           </ol>

@@ -82,7 +82,7 @@ export default function MetricsPanel() {
   }, [series, currentT])
 
   return (
-    <section className={styles.section} aria-labelledby="metrics-panel-heading">
+    <section className={styles.section} aria-labelledby="metrics-panel-heading" data-tour="panel-overview">
       <div className="panel-heading">
         <span id="metrics-panel-heading">Hydrodynamic metrics</span>
         {hasData && <span className={styles.tMin}>Frame: T+{currentT} min</span>}

@@ -18,6 +18,11 @@ dependencies = [
 
 [project.optional-dependencies]
 swmm = ["pyswmm>=2.0"]
+# GPM IMERG granules are HDF5. Only IMERGSatelliteProvider needs this; without it that provider reports
+# ProviderUnavailable naming the missing package rather than failing obscurely at import time.
+imerg = ["h5py>=3.10"]
+# The IMD Mumbai-Veravali SRI product is a GIF image; only IMDVeravaliSRIImageProvider needs Pillow to read it.
+radar = ["Pillow>=10.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -25,6 +30,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["floodnet*"]
+
+[tool.setuptools.package-data]
+"floodnet.rainfall" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

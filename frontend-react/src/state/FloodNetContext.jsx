@@ -21,10 +21,14 @@ export const SIMULATE_STAGES = [
 export const LIVE_ID = 'live'
 
 // Reserved scenario id for an ECMWF NWP forecast run (floodnet/rainfall/provider.py::ECMWF_ID) -- a
-// TEMPORARY rainfall source (Open-Meteo, ECMWF IFS model) used while official IMD API access is pending.
+// rainfall FORECAST source (Open-Meteo, ECMWF IFS model); introduced while IMD API access was pending.
 // Routed through the exact same POST /api/simulate contract as every other scenario. Must never be
 // conflated with LIVE_ID in the UI: this is an NWP FORECAST, not an IMD observation, not a radar nowcast.
 export const ECMWF_ID = 'ecmwf'
+
+// Reserved scenario id for the EXPERIMENTAL field decoded from IMD's public Mumbai-Veravali DWR SRI image
+// (floodnet/rainfall/provider.py::IMD_SRI_ID). A radar-DERIVED ESTIMATE, never official IMD QPE or a nowcast.
+export const RADAR_SRI_ID = 'imd_sri'
 
 // A failed live attempt is either "not configured" (no IMD_API_KEY -- the expected, common case right now)
 // or "configured but the request itself failed" (network/parse error) -- api/main.py's 503 detail always
@@ -510,7 +514,45 @@ export function FloodNetProvider({ children }) {
     [planRoute, currentT],
   )
 
+  // 2D map | 3D terrain. Pure view state: switching never touches the run, the timeline, the selected source
+  // or the selected street. `mapView` is the Leaflet centre (so 3D opens where the operator was looking) and
+  // `terrainFocus` lets a tour point the 3D camera at a real place.
+  const [mapMode, setMapMode] = useState('2d')
+  const [mapView, setMapView] = useState(null)
+  const [terrainFocus, setTerrainFocus] = useState(null)
+
   const toggleLayer = useCallback((key) => setLayers((l) => ({ ...l, [key]: !l[key] })), [])
+  // For the tours: switch layers ON without needing to know their current state, and put a saved
+  // snapshot back afterwards -- so an explainer never leaves the operator's layer choices changed.
+  const ensureLayers = useCallback((keys) => setLayers((l) => (
+    keys.every((k) => l[k]) ? l : { ...l, ...Object.fromEntries(keys.map((k) => [k, true])) }
+  )), [])
+  const restoreLayers = useCallback((snapshot) => { if (snapshot) setLayers(snapshot) }, [])
+
+  // ---------------------------------------------------------------- guided tour / briefing support
+  // Two small additions, both ADDITIVE -- nothing above depends on them, and removing them restores the
+  // previous behaviour exactly.
+  //
+  // 1. `activeRightTab` was local state inside App.jsx's RightPanel. It is lifted here (and only here) so a
+  //    guided briefing can open the Alerts / Why-flooded / Route tab as part of a narrated step, instead of
+  //    the briefing reaching into the DOM to click a tab button. RightPanel still owns all of its rendering;
+  //    it just reads/writes the selected tab through context now.
+  const [activeRightTab, setActiveRightTab] = useState('overview')
+
+  // 2. A one-way command bus to the map. MapView keeps its Leaflet instance and layer indexes in internal
+  //    refs (correctly -- they are imperative objects, not React state), so there is no way to fly the map or
+  //    highlight a segment from outside without either exporting those refs or hacking the DOM. Instead,
+  //    callers push a small declarative command here and MapView executes it against its own refs. `nonce`
+  //    makes repeated identical commands (e.g. flying to the same place twice in one briefing) still fire.
+  //    Commands are fire-and-forget: MapView ignores any it does not recognise, and a command issued while
+  //    the map is unmounted is simply dropped.
+  const [mapCommand, setMapCommand] = useState(null)
+  const mapCommandNonceRef = useRef(0)
+  const issueMapCommand = useCallback((cmd) => {
+    if (!cmd?.type) return
+    mapCommandNonceRef.current += 1
+    setMapCommand({ ...cmd, nonce: mapCommandNonceRef.current })
+  }, [])
 
   const value = useMemo(
     () => ({
@@ -562,19 +604,32 @@ export function FloodNetProvider({ children }) {
       selectAlternative,
       layers,
       toggleLayer,
+      ensureLayers,
+      restoreLayers,
+      mapMode,
+      setMapMode,
+      mapView,
+      setMapView,
+      terrainFocus,
+      setTerrainFocus,
       terrainOpacity,
       setTerrainOpacity,
       depthOpacity,
       setDepthOpacity,
       notice,
       notify,
+      activeRightTab,
+      setActiveRightTab,
+      mapCommand,
+      issueMapCommand,
     }),
     [
       meta, status, provenance, scenarios, currentScenario, scenarioId, setScenarioId, blockage, setBlockage, isStale, bootLoading, bootError,
       roads, topology, hotspots, terrain, run, compareResult, series, frame, currentT, playing, simulating,
       simStageIdx, simError, liveAttempt, ecmwfAttempt, runSimulation, runCompare, selectedSegId, selectSegment, explain, explainLoading,
       explainError, route, planRoute, clearRoute, setRouteVehicle, pickPoint, alternatives, alternativesStale, planRouteAlternatives, selectAlternative,
-      layers, toggleLayer, terrainOpacity, depthOpacity, notice, notify,
+      layers, toggleLayer, ensureLayers, restoreLayers, mapMode, mapView, terrainFocus, terrainOpacity, depthOpacity, notice, notify,
+      activeRightTab, mapCommand, issueMapCommand,
     ],
   )
 

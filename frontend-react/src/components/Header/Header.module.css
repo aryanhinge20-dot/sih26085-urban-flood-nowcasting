@@ -149,6 +149,11 @@
   color: var(--text);
   white-space: nowrap;
   font-family: var(--mono);
+  /* long source names (e.g. the radar-derived and live+persistence labels) truncate instead of widening
+     the masthead; the full text is in the title tooltip */
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .metaDivider {

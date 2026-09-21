@@ -16,7 +16,8 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
-  base: '/static/',
+  // '/static/' when FastAPI serves the build (default); VITE_BASE=/ for a static host such as Vercel.
+  base: process.env.VITE_BASE || '/static/',
   appType: 'spa',     // enables historyApiFallback for pushState routes in dev
   server: {
     port: 5173,

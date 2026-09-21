@@ -334,7 +334,7 @@ known modelling simplification is documented rather than hidden — see `docs/VA
 
 | SR | Status | Evidence |
 |---|---|---|
-| SR-01 rainfall nowcast input | **PARTIAL** | `floodnet/rainfall/provider.py`: `ScenarioProvider` (SYNTHETIC) + `HistoricalReplayProvider` (REAL, 26 July 2005) + `IMDObservationProvider` (REAL live observation from api.imd.gov.in when `IMD_API_KEY` is configured — see `docs/LIVE_RAINFALL_AUDIT.md`) + `ECMWFForecastProvider` (REAL NWP forecast via Open-Meteo, no key needed — temporary stand-in while IMD access is pending; see `docs/ECMWF_OPENMETEO_AUDIT.md`). No IMD source, gated or not, publishes a quantitative sub-hourly nowcast product, and no genuine no-auth Mumbai radar/nowcast path was found on re-investigation (2026-09-09) either, so the highest-resolution real input remains an explicitly-labelled ESTIMATED persistence forecast (IMD) or NWP forecast (ECMWF) — never presented as radar-derived. `ExternalNowcastProvider` stays an inert stub for a future radar/pysteps adapter. A follow-up pass (2026-09-10), plus a dedicated IMD-API investigation and an independent adversarial review of it, closed this question — see `docs/LIVE_RAINFALL_AUDIT.md` §8b/§8c for the full evidence and the **PATH D** decision. Summary: IMD's API reference documents **no radar endpoint at all** (the "Radar Image" index entry is a dead anchor); the public Mumbai `sri_mum.gif` *is* genuinely Surface Rainfall Intensity in mm/hr with a published Z-R relation, but its **top bin is open-ended at `>100 mm/h`** while this project's own `cloudburst` (120 mm/h) and `july2005` (190.3 mm/h) scenarios exceed it — so it censors exactly the regime FloodNet models — with ±3.33 mm/h quantisation, ~12.5% coastline occlusion over the pilot, 30–40 min latency, and an explicit IMD copyright assertion with no licence grant. No free historical archive exists, so a radar hindcast is impossible. **No radar decoder is being built.** <br><br>**Structural finding that reframes this requirement:** the gap is not only data access. `contracts.RainfallScenario.intensity_mm_h` is a **`[T]` array** and `intensity_at()` returns a single **`float`**, which `engine.run_simulation` passes to `runoff_fn` — so rainfall is **spatially uniform by construction, for every provider**. FloodNet cannot ingest a gridded rainfall field from any source today. Obtaining radar data would not, by itself, satisfy the "high-resolution/gridded" half of SR-01; generalising `RainfallScenario` to accept an optional `[T, ny, nx]` field is the honest prerequisite, and it is **NOT IMPLEMENTED**. |
+| SR-01 rainfall nowcast input | **PARTIAL** | **Current state: §9–§10 below (IMD live, radar-image path, gated nowcast); the text in this cell is the 2026-09-10 record.** `floodnet/rainfall/provider.py`: `ScenarioProvider` (SYNTHETIC) + `HistoricalReplayProvider` (REAL, 26 July 2005) + `IMDObservationProvider` (REAL live observation from api.imd.gov.in when `IMD_API_KEY` is configured — see `docs/LIVE_RAINFALL_AUDIT.md`) + `ECMWFForecastProvider` (REAL NWP forecast via Open-Meteo, no key needed — temporary stand-in while IMD access is pending; see `docs/ECMWF_OPENMETEO_AUDIT.md`). No IMD source, gated or not, publishes a quantitative sub-hourly nowcast product, and no genuine no-auth Mumbai radar/nowcast path was found on re-investigation (2026-09-09) either, so the highest-resolution real input remains an explicitly-labelled ESTIMATED persistence forecast (IMD) or NWP forecast (ECMWF) — never presented as radar-derived. `ExternalNowcastProvider` stays an inert stub for a future radar/pysteps adapter. A follow-up pass (2026-09-10), plus a dedicated IMD-API investigation and an independent adversarial review of it, closed this question — see `docs/LIVE_RAINFALL_AUDIT.md` §8b/§8c for the full evidence and the **PATH D** decision. Summary: IMD's API reference documents **no radar endpoint at all** (the "Radar Image" index entry is a dead anchor); the public Mumbai `sri_mum.gif` *is* genuinely Surface Rainfall Intensity in mm/hr with a published Z-R relation, but its **top bin is open-ended at `>100 mm/h`** while this project's own `cloudburst` (120 mm/h) and `july2005` (190.3 mm/h) scenarios exceed it — so it censors exactly the regime FloodNet models — with ±3.33 mm/h quantisation, ~12.5% coastline occlusion over the pilot, 30–40 min latency, and an explicit IMD copyright assertion with no licence grant. No free historical archive exists, so a radar hindcast is impossible. **No radar decoder is being built.** <br><br>**Structural finding that reframes this requirement:** the gap is not only data access. `contracts.RainfallScenario.intensity_mm_h` is a **`[T]` array** and `intensity_at()` returns a single **`float`**, which `engine.run_simulation` passes to `runoff_fn` — so rainfall is **spatially uniform by construction, for every provider**. FloodNet cannot ingest a gridded rainfall field from any source today. Obtaining radar data would not, by itself, satisfy the "high-resolution/gridded" half of SR-01; generalising `RainfallScenario` to accept an optional `[T, ny, nx]` field is the honest prerequisite, and it is **NOT IMPLEMENTED**. |
 | SR-02 0–3 h horizon | **COMPLETE** | `simulation/engine.py::run_simulation(horizon_s=..., frame_dt_s=300)`; API `horizon_min` 5–720, default 180; 37 frames at 5-min resolution. |
 | SR-03 high-resolution DEM | **COMPLETE**, with a stated caveat | Real MCGM 20 cm contour-derived DTM, 10 m grid; agrees with 1,205 surveyed manhole ground levels to mean +0.012 m / SD 0.283 m pilot-wide; 0.65% of the grid (407 cells) is flagged (not altered) as inconsistent with the surveyed network — see `docs/validation/EXTREME_DEPTH.md`. |
 | SR-04 imperviousness/runoff | **COMPLETE** | OSM-derived impervious fraction (ESTIMATED) driving the rational-method runoff coefficient in `terrain/runoff.py`. |
@@ -397,6 +397,83 @@ limitation), SR-06, SR-07 (cross-checked), SR-08, SR-09, SR-10, SR-11, SR-12 (ba
 outstanding), SR-14, SR-15, SR-16. PARTIAL — SR-01 (rainfall spatially uniform by architecture, no radar),
 SR-13 (83.95s–150s per full run, not sub-second/real-time-streaming). **Nothing MISSING, nothing newly
 BLOCKED** beyond the pre-existing, evidenced radar/IMD-credential blocks already recorded in SR-01's evidence.
+
+## 8. 2026-09-14 real-data + gridded-rainfall pass — SR-01 partially unblocked
+
+A verification-and-execution pass audited every model input against its official source and attacked the
+SR-01 gridded-rainfall gap directly. Full evidence: `docs/DECISIONS.md` D-15 (resolved) and D-16/D-17/D-18;
+`docs/VALIDATION.md` §10.
+
+**SR-01 — status stays PARTIAL, but the reason has fundamentally changed.** Previously the blocker was
+*both* data access *and* our own architecture: `RainfallScenario` was `[T]`-only, so **no** source, radar or
+otherwise, could have delivered a spatial field (D-15). **That architectural half is now closed.** The
+contract accepts an optional `[T, ny, nx]` field + grid; `runoff_fn` accepts a scalar or a field;
+`engine.run_simulation` branches on `scenario.is_spatial` and refuses a field whose grid does not match the
+terrain grid; `floodnet/rainfall/gridded.py` handles reprojection/resampling. Uniform scenarios keep the
+byte-identical original path. Demonstrated end-to-end on the real pilot: a spatial storm and a uniform storm
+carrying the **identical total rain volume (58,213.6 m³ each)** produce **materially different flooding** —
+3,469 cells differ by >1 cm, max per-cell difference 39.5 cm, peak depth 79.2 vs 74.5 cm, both conserving
+mass to ~3e-13 %. 24 new tests (`backend/tests/test_spatial_rainfall.py`).
+
+**What keeps SR-01 at PARTIAL is now DATA ALONE, and specifically resolution:**
+- The best real, CC0-licensed, Mumbai-covering gridded source found is **GPM IMERG** (implemented as
+  `IMERGSatelliteProvider`, credential-gated on `EARTHDATA_TOKEN`). It is **not ground radar** — satellite
+  PMW/IR intercalibrated against a spaceborne-radar reference — and at 0.1° (~11 km) **the entire pilot falls
+  inside a single source cell**, so it contributes *zero* spatial variation at pilot scale. Real provenance,
+  real temporal behaviour, no spatial detail. See D-16.
+- Genuine sub-km rainfall over this pilot still requires IMD's Mumbai S-band DWR, whose supply portal was
+  unreachable and whose cost/format/approval terms remain unverified. Unchanged from D-14.
+- Therefore the honest claim is: **the system can now ingest and route a genuine gridded rainfall field; no
+  freely-licensed source exists that resolves rainfall structure inside this pilot.** The only spatially-
+  varying field currently runnable end-to-end is the clearly-labelled SYNTHETIC `synthetic_spatial` storm,
+  which exists to exercise and test the pathway and is never presented as observed or as radar.
+
+**SR-04 (imperviousness) — unchanged at COMPLETE, with a now-identified better source.** ESA WorldCover 10 m
+(CC BY 4.0, unrestricted, no registration) matches the model grid exactly and would replace the current
+OSM-geometry rule with its flat 0.6 default; IRC:SP:50-2013 §6.4.1 documents Mumbai's own design runoff
+coefficient (1.0 fully developed, 0.58–1.0 otherwise). **Neither was applied** — both are physics changes
+requiring the full validation gate and an owner decision (D-18), not silent substitutions.
+
+**SR-07 (hydraulic capacity) — unchanged at COMPLETE/cross-checked.** Manning's n stays a blanket 0.013,
+ESTIMATED: no authoritative Indian value could be verified (IRC:SP:50-2013 contains no n-by-material table;
+CPHEEO's manuals were unreachable). The 62 brick arch conduits were deliberately **not** changed (D-18).
+
+**SR-08 (surcharge) — figures superseded.** Manhole plan area moved from an invented blanket 1.5 m² to
+IS 4111 (Part 1)-1986 depth bands (D-17), a −26.2 % change in total chamber storage. Peak depth 268.72 →
+292.27 cm, peak surcharging nodes 424 → 459, total surcharge 124,981 → 133,020 m³ (`heavy` + 70 % blockage,
+180 min); mass balance still −3.15e-12 %. **Any figure published before 2026-09-14 was computed with the old
+1.5 m² and is superseded.**
+
+## 9. 2026-09-18 IMD access + experimental radar-image pass — SR-01 remains PARTIAL
+
+- **IMD API observations are live.** With `IMD_API_KEY` + `IMD_API_TOKEN` (JWT) + an IP-bound key,
+  `current_wx` (Santacruz 43003, Colaba 43057), `stationnowcast`, `districtnowcast` and `districtrainfall`
+  returned HTTP 200 with Mumbai rows. `IMDObservationProvider` ran live end-to-end (REAL observation + ESTIMATED
+  3-hour persistence; run-level mode `MIXED`). The JWT expires and must be renewed manually.
+- **No radar-product API.** api.imd.gov.in lists "Radar Image" only as a dead index entry; IMD confirmed the
+  portal does not provide radar products. The public Mumbai-Veravali SRI and PAC products are rendered images.
+- **Experimental radar-image path built** (`IMDVeravaliSRIImageProvider`, D-20, `docs/RADAR_SRI_IMAGE.md`):
+  decodes the public SRI image into a `[T, ny, nx]` field tagged `RADAR_IMAGE_DERIVED_ESTIMATE` / ESTIMATED.
+  Verified live end-to-end on the demo backend (frame 06:00:45 UTC; pilot had no echo → 0 mm/h, no flooding, as
+  expected). Limits: legend-band precision, one excluded band (~23.7–26.2 mm/h), cap ~49 mm/h, approximate
+  georeference, one frame (persistence, no motion nowcast), reuse/automated-retrieval permission unresolved.
+- **Why still PARTIAL:** this is not a numerical IMD radar product and not a 0–3 h radar nowcast; no accuracy is
+  claimed. COMPLETE needs IMD's native numerical DWR data (DSP request) under a confirmed licence.
+
+## 10. 2026-09-21 competitive pass — temporal radar step, technology story
+
+- **SR-01 (still PARTIAL):** gated "Experimental radar-image nowcast" (5–30 min advection of decoded SRI fields)
+  and a source-aware horizon with ECMWF/persistence after 30 min; per-period sources in provenance and UI.
+  Logic-tested; awaiting two consecutive real scans (`docs/RADAR_NOWCAST_STATUS.md`). Not an IMD nowcast.
+- **SR-12 / SR-15 (presentation):** shared seven-stage technology story, dashboard story strip, Demo Story,
+  route A/B flood-exposure comparison (`docs/TECHNOLOGY_EXPLAINER.md`). No requirement status changed.
+- **Tide / backflow (SR-08 context):** investigated, not implemented (D-22).
+- Competitor evidence and gap matrix: `docs/COMPETITIVE_VIDEO_ANALYSIS.md`.
+
+## 11. 2026-09-21 final submission pass
+
+No requirement status changed (SR-01 PARTIAL as in §9–§10). UI truth-sync, canonical source labels, deployment
+architecture and the current one-page summary are in `docs/FINAL_STATUS.md` and `docs/DEPLOYMENT.md`.
 
 ## Related documents
 

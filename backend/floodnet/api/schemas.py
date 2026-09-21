@@ -53,3 +53,12 @@ class RouteRequest(BaseModel):
             raise ValueError(f"coordinate out of range: lon={lon}, lat={lat} "
                               "(expected abs(lon)<=180, abs(lat)<=90)")
         return v
+
+
+class TTSRequest(BaseModel):
+    """Guided-briefing voice request. `text` is narration the frontend already built from real simulation
+    state (lib/briefing/facts.js -> narration.js); this endpoint only converts it to audio and never edits,
+    translates or generates narration of its own."""
+    text: str = Field(min_length=1, max_length=1200)
+    lang: str = Field(default="en", pattern="^(en|hi|mr)$",
+                      description="briefing language; maps to en-IN / hi-IN / mr-IN server-side")

@@ -6,6 +6,12 @@
 // Units returned by the backend: rainfall mm/h, depth cm (already converted from internal metres at the API
 // boundary), volumes m3, time minutes (t_min), coordinates [lon, lat].
 
+// Production API origin, e.g. https://floodnet-api.example.com (no trailing slash). Empty/unset means the API
+// is served from the SAME origin as the page (local FastAPI at /static, or the Vite dev proxy). This is the
+// only deployment setting the frontend has; it is a public URL, never a secret.
+export const API_BASE_URL = String(import.meta.env?.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+export const apiUrl = (path) => `${API_BASE_URL}${path}`
+
 export class ApiError extends Error {
   constructor(message, { status = null, detail = null, path = null } = {}) {
     super(message)
@@ -19,7 +25,7 @@ export class ApiError extends Error {
 async function request(path, { method = 'GET', body } = {}) {
   let res
   try {
-    res = await fetch(path, {
+    res = await fetch(apiUrl(path), {
       method,
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
@@ -52,6 +58,11 @@ export const getRoads = () => request('/api/roads')
 export const getTopology = () => request('/api/topology')
 export const getHotspots = () => request('/api/hotspots')
 export const getTerrain = () => request('/api/terrain')
+// The simulator's own DEM, lossless (raw float32) -- the single source for the 3D terrain view.
+export const getDem = () => request('/api/terrain/dem')
+// (getHotspots above = MCGM's known flood spots; this is the run-derived hotspot summary)
+export const getFloodIntelligence = (runId) => request(`/api/simulation/${encodeURIComponent(runId)}/hotspots`)
+export const getDataStatus = () => request('/api/data-status')
 
 // ---------------------------------------------------------------- simulation
 export const simulate = ({ scenarioId, blockage, horizonMin = 180 }) =>

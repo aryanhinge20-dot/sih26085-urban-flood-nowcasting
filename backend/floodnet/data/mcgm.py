@@ -30,8 +30,53 @@ MANNING_N_BY_SHAPE = {          # Chow (1959) Open-Channel Hydraulics, table 5-6
 }
 MANNING_N_DEFAULT = 0.013
 SLOPE_MIN = 1e-4                # floor for flat/adverse conduits (26 adverse + 119 flat network-wide, DRAINAGE.md)
-STORAGE_AREA_M2 = 1.5           # ASSUMPTION: typical manhole plan area (~1.2-1.5 m chamber); not from MCGM data
+STORAGE_AREA_M2 = 1.5           # LEGACY blanket assumption, superseded by IS 4111 banding below; kept only
+                                # because provenance text and older validation artefacts refer to it.
 INLET_CAP_M3S = 0.05            # ASSUMPTION: order-of-magnitude capture rate of one kerb inlet/manhole; not from MCGM data
+
+# --- Manhole plan area, depth-banded per IS 4111 (Part 1) - 1986 -------------------------------------
+# Supersedes the single blanket 1.5 m2 assumption above. MCGM's data carries no chamber-size field, so the
+# chamber size is inferred from the node's own depth (node_ground - node_invert, both from REAL MCGM data)
+# using the depth bands the Indian Standard itself specifies.
+#
+# Source, quoted verbatim from IS 4111 (Part 1) - 1986 (Code of practice for ancillary structures in
+# sewerage system: Manholes), fetched from law.resource.org/pub/in/bis/S03/is.4111.1.1986.html:
+#   3.3.2  "For depths less than 0.90 m, 900 x 800 mm"
+#          "For depths from 0.90 m and up to 2.5 m, 1 200 x 900 mm"
+#   3.3.3  "For depths of 2.5 m and above ... 1 400 x 900 mm"
+#   3.3.4  circular: 900 mm dia (0.90-1.65 m), 1 200 mm (1.65-2.30 m), 1 500 mm (2.30-9.0 m),
+#          1 800 mm (9.0-14.0 m)
+#
+# WHICH SERIES: the standard permits BOTH rectangular (3.3.2/3.3.3) and circular (3.3.4) chambers, and
+# nothing in the MCGM dataset says which was built. The RECTANGULAR series is used here because it is the
+# one that covers the full depth range including the shallowest band (<0.90 m, which the circular series
+# does not cover at all), so it needs no invented extrapolation. The circular equivalents are listed in the
+# provenance note so the alternative is visible rather than hidden.
+#
+# TAG REMAINS **ESTIMATED**, deliberately. The dimensions are real and citable, but "MCGM's chambers conform
+# to IS 4111" is still an assumption about this particular network, not a measurement of it. This is a
+# better-evidenced estimate, not an observation, and must not be relabelled REAL.
+IS4111_RECT_BANDS_M2 = (        # (max_depth_m_exclusive, plan_area_m2, dimension label)
+    (0.90, 0.72, "900 x 800 mm (IS 4111-1 cl. 3.3.2, depth < 0.90 m)"),
+    (2.50, 1.08, "1200 x 900 mm (IS 4111-1 cl. 3.3.2, depth 0.90-2.5 m)"),
+    (float("inf"), 1.26, "1400 x 900 mm (IS 4111-1 cl. 3.3.3, depth >= 2.5 m)"),
+)
+
+
+def storage_area_from_depth(depth_m: np.ndarray) -> np.ndarray:
+    """Manhole plan area (m2) per node, banded by chamber depth per IS 4111 (Part 1) - 1986.
+
+    `depth_m` is node_ground - node_invert (both REAL MCGM values). Non-finite or non-positive depths fall
+    into the shallowest band rather than being dropped, so every node always gets a defensible area."""
+    d = np.asarray(depth_m, dtype=np.float64)
+    d = np.where(np.isfinite(d), d, 0.0)
+    out = np.full(d.shape, IS4111_RECT_BANDS_M2[-1][1], dtype=np.float32)
+    prev = -np.inf
+    for upper, area, _label in IS4111_RECT_BANDS_M2:
+        out[(d > prev) & (d <= upper)] = area
+        prev = upper
+    out[d <= 0] = IS4111_RECT_BANDS_M2[0][1]
+    return out
 
 _T_GEO_TO_UTM = Transformer.from_crs(CRS_GEO, CRS_COMPUTE, always_xy=True)
 
@@ -184,8 +229,16 @@ def build_network(bbox_lonlat, margin_m: float, include_proposal: bool = False,
         "capacity": Provenance(Tag.ESTIMATED, "Manning full-bore formula",
                                "Q = A R^(2/3) S^(1/2)/n with REAL W/H/inverts and ESTIMATED n; "
                                "CIRC R=D/4, RECT/OREC/ARCH treated as rectangle W x H").to_dict(),
-        "storage_area": Provenance(Tag.ESTIMATED, "assumption",
-                                   f"{STORAGE_AREA_M2} m2 plan area per manhole (typical chamber size); not in MCGM data").to_dict(),
+        "storage_area": Provenance(
+            Tag.ESTIMATED, "IS 4111 (Part 1) - 1986, Manholes, cl. 3.3.2 / 3.3.3 (rectangular series)",
+            "Manhole plan area banded by the node's own depth (node_ground - node_invert, both REAL MCGM "
+            "values) using the Indian Standard's own depth bands: <0.90 m -> 900x800 mm = 0.72 m2; "
+            "0.90-2.5 m -> 1200x900 mm = 1.08 m2; >=2.5 m -> 1400x900 mm = 1.26 m2. Supersedes the previous "
+            f"blanket {STORAGE_AREA_M2} m2 assumption. IS 4111 cl. 3.3.4 permits CIRCULAR chambers instead "
+            "(900/1200/1500/1800 mm dia = 0.64/1.13/1.77/2.54 m2); MCGM's data carries no chamber-size or "
+            "shape field, so the rectangular series is used because it alone covers the shallowest band. "
+            "STILL ESTIMATED: the dimensions are real and citable, but 'these chambers conform to IS 4111' "
+            "is an assumption about this network, not a measurement of it.").to_dict(),
         "inlet_capacity": Provenance(Tag.ESTIMATED, "assumption",
                                      f"{INLET_CAP_M3S} m3/s per node, order-of-magnitude for a kerb inlet; not in MCGM data").to_dict(),
     }
@@ -193,7 +246,7 @@ def build_network(bbox_lonlat, margin_m: float, include_proposal: bool = False,
     return DrainageNetwork(
         node_id=np.array(node_ids, dtype=object), node_x=nx_.astype(np.float64), node_y=ny_.astype(np.float64),
         node_ground=node_ground, node_invert=node_invert, node_is_outfall=is_outfall,
-        node_storage_area_m2=np.full(N, STORAGE_AREA_M2, dtype=np.float32),
+        node_storage_area_m2=storage_area_from_depth(node_ground - node_invert),
         node_inlet_cap_m3s=np.full(N, INLET_CAP_M3S, dtype=np.float32),
         node_cell_j=cj.astype(int), node_cell_i=ci.astype(int),
         edge_id=np.array([c["id"] for c in keep], dtype=object),

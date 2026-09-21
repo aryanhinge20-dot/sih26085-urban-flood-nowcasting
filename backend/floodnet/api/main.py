@@ -10,6 +10,8 @@ from functools import lru_cache
 from typing import Any, Optional
 
 import numpy as np
+from datetime import datetime, timezone
+import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,14 +25,20 @@ from ..drainage.hydraulics import MIN_DEPTH_M  # read-only: solver's own storage
 # `ground = max(node_ground, node_invert + MIN_DEPTH_M)` so derived fill/freeboard match the engine's HGL cap.
 from . import state
 from .png import grayscale_png_base64, depth_png_base64
-from .schemas import SimulateRequest, ReplayRequest, CompareRequest, RouteRequest
+from ..analysis.hotspots import flood_intelligence, segment_timing
+from .schemas import SimulateRequest, ReplayRequest, CompareRequest, RouteRequest, TTSRequest
 
 log = logging.getLogger("floodnet.api")
 FLOOD_SEG_CM = 15.0  # a segment counts as "flooded" at >= 15 cm (minor band, see config.SEVERITY_BANDS_CM)
 
 app = FastAPI(title="FloodNet API", version="0.1.0",
               description="Urban flood nowcasting for the Mumbai Hindmata/Dadar pilot (SIH26085)")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# FLOODNET_CORS_ORIGINS: comma-separated allowed origins for a separately hosted frontend, e.g.
+# "https://floodnet.vercel.app". Unset = "*" (no cookies/credentials are used, so this is safe for a
+# read-mostly prototype API); X-TTS-* headers are exposed so the briefing can show the voice in use.
+_cors = [o.strip() for o in os.environ.get("FLOODNET_CORS_ORIGINS", "*").split(",") if o.strip()] or ["*"]
+app.add_middleware(CORSMiddleware, allow_origins=_cors, allow_methods=["*"], allow_headers=["*"],
+                   expose_headers=["X-TTS-Voice", "X-TTS-Language"])
 
 
 def _index_response():
@@ -83,6 +91,64 @@ def root():
 @app.get("/api/health")
 def health():
     return {"ok": True, "data_mode": state.data_mode(), "runs": state.list_runs()}
+
+
+@app.get("/health", include_in_schema=False)
+def health_plain():
+    """Liveness for load balancers / Docker HEALTHCHECK: answers without touching the pilot or any upstream."""
+    return {"ok": True}
+
+
+@app.get("/api/data-status")
+def data_status():
+    """Compact source-health report. Makes NO upstream call: it reports what the last attempts found, the IMD
+    token state, the cache and the source the last `auto` run used -- so it is cheap to poll. Never contains a
+    credential (see imd_auth.TokenStatus.to_public_dict)."""
+    from ..rainfall.imd_auth import manager as imd
+    from ..rainfall.provider import LIVE_ID, IMD_SRI_ID, ECMWF_ID
+    h = state.source_manager.health()
+    try:
+        _pilot()
+        engine = {"ok": True, "pilot": state.data_mode()}
+    except Exception as ex:  # noqa: BLE001
+        engine = {"ok": False, "reason": type(ex).__name__}
+    auth = imd.status().to_public_dict()
+    src = h["sources"]
+    return {"backend": {"ok": True, "time": datetime.now(timezone.utc).isoformat()},
+            "engine": engine,
+            "imd_auth": auth,
+            "imd_live": src.get(LIVE_ID, {"ok": None, "reason": "not tried yet"}),
+            "radar": src.get(IMD_SRI_ID, {"ok": None, "reason": "not tried yet"}),
+            "ecmwf": src.get(ECMWF_ID, {"ok": None, "reason": "not tried yet"}),
+            "cache": h["cache"], "current_rainfall_source": h["current"],
+            "priority": ["LIVE", "RADAR-DERIVED", "FORECAST", "CACHED", "DEMO"]}
+
+
+@app.post("/api/admin/imd-token", include_in_schema=False)
+async def rotate_imd_token(request: Request):
+    """Rotate the IMD bearer token in the RUNNING server (no restart, no frontend rebuild). Disabled unless
+    FLOODNET_ADMIN_TOKEN is set; callers must send it as `X-Admin-Token`. The new IMD token is read from the
+    JSON body {"token": "..."}; it is never echoed, logged or returned."""
+    import hmac
+    from ..rainfall.imd_auth import manager as imd
+    expected = os.environ.get("FLOODNET_ADMIN_TOKEN") or ""
+    if not expected:
+        raise HTTPException(404, "not found")                       # feature off: do not advertise it
+    supplied = request.headers.get("X-Admin-Token") or ""
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(403, "forbidden")
+    try:
+        body = await request.json()
+        token = str(body["token"]).strip()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(422, "body must be JSON: {\"token\": \"<IMD bearer token>\"}") from None
+    if not (20 <= len(token) <= 4096) or any(c.isspace() for c in token):
+        raise HTTPException(422, "token has an implausible length or contains whitespace")
+    imd.reset()
+    imd.set_runtime_token(token)
+    from ..rainfall.provider import list_providers, LIVE_ID
+    list_providers()[LIVE_ID].clear_cache()
+    return {"ok": True, "imd_auth": imd.status().to_public_dict()}
 
 
 @app.get("/api/status")
@@ -144,6 +210,65 @@ def terrain():
             "png_base64": png, "provenance": t.provenance.to_dict(),
             "impervious_mean": _f(np.nanmean(t.impervious)), "building_fraction": _f(np.mean(t.building)),
             "data_mode": state.data_mode()}
+
+
+_dem_payload_cache: dict = {}
+
+
+def dem_payload(t) -> dict:
+    """The model's OWN terrain array, for the 3D terrain view -- no second dataset, no resampling, no scaling.
+
+    ENCODING (lossless): `z_base64` is base64 of the raw little-endian IEEE-754 float32 bytes of `Terrain.z`,
+    row-major [ny, nx], row 0 = SOUTH (the Grid convention), one value per model cell CENTRE, metres above the
+    datum in `datum`. Decoding reproduces the simulator's values bit-for-bit; `sha256` is the hash of those bytes
+    so any consumer (and tests) can prove it. Non-finite cells, if any ever exist, are transmitted as NaN and
+    counted in `nodata_count` -- never filled here.
+
+    `lonlat_to_grid` is a least-squares AFFINE map lon/lat -> metres east/north of the grid's SW corner, so the
+    browser can place lon/lat overlays (streets) in the model's own UTM frame without a projection library; its
+    worst-case error over the pilot is reported as `max_residual_m`.
+    """
+    import base64
+    import hashlib
+    g = t.grid
+    key = (id(t.z), g.nx, g.ny)
+    if key in _dem_payload_cache:
+        return _dem_payload_cache[key]
+    z = np.ascontiguousarray(t.z, dtype="<f4")
+    raw = z.tobytes()
+    finite = np.isfinite(z)
+
+    # affine lon/lat -> grid metres, fitted on a lattice of the grid's own cell centres
+    jj, ii = np.meshgrid(np.linspace(0, g.ny - 1, 12), np.linspace(0, g.nx - 1, 12), indexing="ij")
+    gx, gy = (ii.ravel() + 0.5) * g.res, (jj.ravel() + 0.5) * g.res
+    lon, lat = state.xy_to_lonlat(g.x0 + gx, g.y0 + gy)
+    A = np.column_stack([lon, lat, np.ones_like(lon)])
+    cx, *_ = np.linalg.lstsq(A, gx, rcond=None)
+    cy, *_ = np.linalg.lstsq(A, gy, rcond=None)
+    resid = float(np.max(np.hypot(A @ cx - gx, A @ cy - gy)))
+
+    out = {
+        "grid": g.to_dict(), "bbox_lonlat": state.grid_bbox_lonlat(g), "shape": [int(g.ny), int(g.nx)],
+        "dtype": "float32", "byte_order": "little", "row0": "south", "cell_registration": "centre",
+        "units": "m", "datum": "mTHD (Town Hall Datum); offset to mean sea level unverified",
+        "encoding": "base64(raw IEEE-754 float32, row-major [ny, nx]) -- lossless, identical to the simulation DEM",
+        "z_base64": base64.b64encode(raw).decode("ascii"), "sha256": hashlib.sha256(raw).hexdigest(),
+        "z_min": float(np.nanmin(z)), "z_max": float(np.nanmax(z)),
+        "z_p01": float(np.nanpercentile(z, 1)), "z_p99": float(np.nanpercentile(z, 99)),
+        "nodata_count": int((~finite).sum()),
+        "building_base64": base64.b64encode(np.ascontiguousarray(t.building, dtype=np.uint8).tobytes()).decode("ascii"),
+        "lonlat_to_grid": {"x": [float(v) for v in cx], "y": [float(v) for v in cy], "max_residual_m": resid},
+        "provenance": t.provenance.to_dict(),
+    }
+    _dem_payload_cache.clear()
+    _dem_payload_cache[key] = out
+    return out
+
+
+@app.get("/api/terrain/dem")
+def terrain_dem():
+    """Exact simulation DEM for the 3D terrain view (see `dem_payload`). Static for the life of the pilot."""
+    return JSONResponse(dem_payload(_pilot()["terrain"]), headers={"Cache-Control": "public, max-age=3600"})
 
 
 # ----------------------------------------------------------------------------- roads / hotspots / scenarios
@@ -269,7 +394,7 @@ def summarize(res: SimulationResult) -> dict:
                         "peak_flooded_segments": max(flooded) if flooded else 0,
                         "total_surcharge_m3": _f(sum(float(f.node_surcharge_m3.sum()) for f in frames)),
                         "peak_rain_mm_h": _f(max((f.rain_mm_h for f in frames), default=0.0))},
-            "notes": list(res.notes), "provenance": provenance, "data_mode": state.data_mode()}
+            "notes": list(res.notes), "provenance": provenance, "data_mode": state.run_data_mode(res)}
 
 
 def _severity(cm: float) -> str:
@@ -368,7 +493,7 @@ def serialize_frame(res: SimulationResult, k: int) -> dict:
             "nodes": nodes, "edges": edges,
             "depth_grid": {"grid": res.grid.to_dict(), "bbox_lonlat": state.grid_bbox_lonlat(res.grid),
                            "png_base64": png, "max_depth_cm": _frame_max_cm(f), "scale_max_cm": vmax * 100.0},
-            "provenance": res.provenance, "data_mode": state.data_mode()}
+            "provenance": res.provenance, "data_mode": state.run_data_mode(res)}
 
 
 def _get_run_or_404(run_id: str) -> SimulationResult:
@@ -379,15 +504,19 @@ def _get_run_or_404(run_id: str) -> SimulationResult:
 
 
 async def _simulate(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
-    from ..rainfall.provider import LIVE_ID, ECMWF_ID, RADAR_ID, ProviderUnavailable
+    from ..rainfall.provider import (LIVE_ID, ECMWF_ID, RADAR_ID, IMERG_ID, SPATIAL_SYNTHETIC_ID, IMD_SRI_ID,
+                                     ProviderUnavailable)
     p = _pilot()
     # RADAR_ID is admitted here on purpose even though it can never produce a run: the radar provider always
     # raises ProviderUnavailable -> HTTP 503 with an explicit "ACCESS PENDING ..." reason. Excluding it would
     # instead 404 as "unknown scenario_id", which reads as "no such thing" rather than the truth ("real
     # integration boundary, deliberately not connected"). See docs/DECISIONS.md D-14.
-    if scenario_id not in (LIVE_ID, ECMWF_ID, RADAR_ID) and scenario_id not in p["scenarios"]:
+    # IMERG_ID is likewise admitted: it is a real, CC0-licensed gridded satellite source that 503s with an
+    # explicit "set EARTHDATA_TOKEN" reason when uncredentialed -- again the honest answer, not a 404.
+    _SOURCE_IDS = (LIVE_ID, ECMWF_ID, RADAR_ID, IMERG_ID, SPATIAL_SYNTHETIC_ID, IMD_SRI_ID, state.AUTO_ID, state.DEMO_ID)
+    if scenario_id not in _SOURCE_IDS and scenario_id not in p["scenarios"]:
         raise HTTPException(404, f"unknown scenario_id {scenario_id!r}; "
-                                 f"available: {list(p['scenarios']) + [LIVE_ID, ECMWF_ID, RADAR_ID]}")
+                                 f"available: {list(p['scenarios']) + list(_SOURCE_IDS)}")
     try:
         return await run_in_threadpool(state.run_scenario, scenario_id, blockage, horizon_min)
     except state.ModuleMissing:
@@ -478,7 +607,7 @@ def series(run_id: str):
             "cause_counts": cause_counts, "edges_at_capacity": edges_at_capacity,
             "edges_near_capacity": edges_near_capacity, "mean_edge_util": mean_edge_util,
             "max_edge_util": max_edge_util, "nodes_at_capacity": nodes_at_capacity,
-            "streets": streets, "provenance": res.provenance, "data_mode": state.data_mode()}
+            "streets": streets, "provenance": res.provenance, "data_mode": state.run_data_mode(res)}
 
 
 # ----------------------------------------------------------------------------- explain a road segment
@@ -588,9 +717,23 @@ def explain(run_id: str, seg_id: str, t_min: Optional[float] = None):
                                       "surcharging": surcharging, "cause": node_cause_raw,
                                       "utilization": utilization},
             "dominant_cause": dominant_cause,
+            # peak / peak time / onset for THIS segment over the whole run (street inspector)
+            "timing": segment_timing(res, seg.seg_id),
             "terrain_context": {"ground_elevation_m": ground_m, "note": terrain_note},
             "provenance": {"roads": roads_graph.provenance.to_dict(), "network": net_prov,
                            "terrain": terrain.provenance.to_dict()}}
+
+
+# ----------------------------------------------------------------------------- flood hotspot intelligence
+@app.get("/api/simulation/{run_id}/hotspots")
+def hotspots(run_id: str, top: int = 5):
+    """Operational summary derived from the finished run: max depth, earliest onset, peak time, flooded area,
+    affected road length / intersections and the ranked top hotspots (floodnet/analysis/hotspots.py)."""
+    res = _get_run_or_404(run_id)
+    p = _pilot()
+    out = flood_intelligence(res, p.get("roads"), p.get("terrain"), top_n=max(1, min(int(top), 20)))
+    out.update({"run_id": res.run_id, "data_mode": state.run_data_mode(res)})
+    return out
 
 
 # ----------------------------------------------------------------------------- CAP alert draft
@@ -614,7 +757,7 @@ def alert_draft(run_id: str, format: str = "json"):  # noqa: A002 -- query param
     p = _pilot()
     from ..alerts.cap import CAP_NS, build_cap_alert
     try:
-        draft = build_cap_alert(res, p["net"], p.get("roads"), data_mode=state.data_mode())
+        draft = build_cap_alert(res, p["net"], p.get("roads"), data_mode=state.run_data_mode(res))
     except ValueError as e:
         raise HTTPException(422, str(e))
     xml = draft.to_xml()
@@ -629,7 +772,34 @@ def alert_draft(run_id: str, format: str = "json"):  # noqa: A002 -- query param
             "issued": False, "message_class": "MODEL_FORECAST_DRAFT_NOT_ISSUED",
             "disclaimer": draft.model_basis["disclaimer"],
             "xml_url": f"/api/simulation/{res.run_id}/alert?format=xml",
-            "provenance": provenance, "data_mode": state.data_mode()}
+            "provenance": provenance, "data_mode": state.run_data_mode(res)}
+
+
+# ----------------------------------------------------------------------------- guided-briefing voice
+# ADDITIVE and outside the scientific pipeline: this endpoint touches no model, no rainfall, no drainage and
+# no routing code. It exists solely so the Guided Briefing's neural voice key stays server-side -- the
+# browser posts already-approved narration text (built from real simulation state in the frontend) and gets
+# audio back. See floodnet/tts.py for the provider contract and the no-fabrication boundary.
+@app.get("/api/tts/status")
+def tts_status():
+    """Whether the neural voice is configured. Cheap, no upstream call, never returns the key."""
+    from .. import tts
+    return {"available": tts.is_configured(), "reason": tts.unavailable_reason(),
+            "languages": sorted(tts.LANG_TAGS)}
+
+
+@app.post("/api/tts")
+async def tts_synthesize(req: TTSRequest):
+    from .. import tts
+    try:
+        out = await run_in_threadpool(tts.synthesize, req.text, req.lang)
+    except tts.TTSUnavailable as e:
+        # 503 with an honest reason, exactly like the rainfall providers. The frontend treats this as
+        # "fall back to browser speech and show voice-unavailable", never as a reason to skip the briefing.
+        raise HTTPException(503, f"text-to-speech unavailable: {e}")
+    return Response(content=out.audio, media_type=out.media_type,
+                    headers={"X-TTS-Voice": out.voice, "X-TTS-Language": out.language_code,
+                             "Cache-Control": "no-store"})
 
 
 @app.get("/api/nowcast")
@@ -677,7 +847,7 @@ async def compare(req: CompareRequest):
             "delta": {"max_depth_cm": b["summary"]["max_depth_cm"] - n["summary"]["max_depth_cm"],
                       "peak_flooded_segments": b["summary"]["peak_flooded_segments"] - n["summary"]["peak_flooded_segments"],
                       "peak_surcharging_nodes": b["summary"]["peak_surcharging_nodes"] - n["summary"]["peak_surcharging_nodes"]},
-            "provenance": b["provenance"], "data_mode": state.data_mode()}
+            "provenance": b["provenance"], "data_mode": state.run_data_mode(blocked)}
 
 
 # ----------------------------------------------------------------------------- routing
@@ -701,7 +871,7 @@ async def route(req: RouteRequest):
     out = dict(out or {})
     out.update({"t_min": req.t_min, "run_id": res.run_id if res is not None else None, "vehicle": req.vehicle,
                 "depth_source": "simulation frame" if res is not None else "no run: dry network assumed",
-                "data_mode": state.data_mode()})
+                "data_mode": state.run_data_mode(res)})
     out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(),
                                   "depths": res.provenance if res is not None else None})
     return out
@@ -745,7 +915,7 @@ async def route_alternatives(req: RouteRequest):
 
     out.update({"t_min": req.t_min, "run_id": res.run_id if res is not None else None, "vehicle": req.vehicle,
                 "depth_source": "simulation frame" if res is not None else "no run: dry network assumed",
-                "data_mode": state.data_mode()})
+                "data_mode": state.run_data_mode(res)})
     out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(),
                                   "depths": res.provenance if res is not None else None})
     return out

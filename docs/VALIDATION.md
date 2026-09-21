@@ -262,9 +262,35 @@ unavailability, and the distinction matters if a judge presses:
 - §8b: *"**No radar-based feature is being implemented.**"* The gated paid path (`radarapi.imd.gov.in`) was
   not pursued and remains UNKNOWN.
 
-**Structural note:** even perfect radar would not currently help. `contracts.RainfallScenario` carries
-`intensity_mm_h` as a `[T]` array and `intensity_at(t)` returns a single `float` — **the engine cannot ingest a
-spatial rainfall field from any source.** Rainfall is applied uniformly across the whole pilot.
+**Structural note:** ~~even perfect radar would not currently help. `contracts.RainfallScenario` carries
+`intensity_mm_h` as a `[T]` array and `intensity_at(t)` returns a single `float` — the engine cannot ingest a
+spatial rainfall field from any source.~~ **SUPERSEDED 2026-09-14: this is no longer true.** The engine now
+ingests `[T, ny, nx]` fields (§10.1, D-15 resolved). **The blocker is now entirely data access, not
+architecture** — see the final radar search below and D-19.
+
+**FINAL EXHAUSTIVE RADAR SEARCH (2026-09-14) — RADAR INTEGRATION BLOCKED BY DATA ACCESS.** A search
+targeting *only* genuinely radar-derived rainfall for Mumbai (explicitly excluding satellite QPE, NWP,
+gauges and colour tiles) checked nine avenues and found **no genuinely radar-derived, Mumbai-covering,
+legally-usable, programmatically-obtainable dataset with the temporal continuity a 0–3 h nowcast requires.**
+Nothing was implemented as a substitute. Two candidates were genuinely radar and still had to be rejected,
+which is worth knowing because both look viable at first glance:
+
+- **CEDA INCOMPASS v2** — genuinely IMD-DWR-derived, **Mumbai is explicitly one of its sites**, licensed
+  **OGL v3**, freely downloadable with a CEDA account. Rejected because it is a **convective-cell object
+  table**, not a field (`datetime, CTH [m], size [km], latitude, longitude, cell 2 km mean reflectivity
+  [dBZ]`, BADC-CSV, 2016 only). Rebuilding a `[T, ny, nx]` field from cell centroids plus one mean
+  reflectivity each would mean **inventing the intra-cell structure** — fabrication, so it was not done.
+- **GPM DPR (2ADPR)** — a genuine spaceborne precipitation radar, genuinely quantitative (mm/hr), openly
+  licensed, scriptable. Rejected on two independent grounds: **revisit** (non-sun-synchronous orbit crossing
+  a fixed point of order ~10 times a *month* — gaps of days, so it can never drive a 0–3 h nowcast) and
+  **resolution** (5 km footprint is *larger than the entire 2.4 × 2.55 km pilot*, so it too contributes no
+  intra-pilot variation, and most overpasses miss the pilot).
+
+The closest viable route remains IMD's own paid supply channel; its specific technical blocker is a **broken
+TLS certificate chain on `radarapi.imd.gov.in`**, so the radar product catalogue and prices are still
+UNVERIFIED. Newly established and actionable: IMD registration is **open to individuals/students**, not
+MoU-gated, and radar is **explicitly absent from IMD's free-data list** (i.e. chargeable). Full evidence,
+rejected-candidate table and the exact human action required: `docs/DECISIONS.md` **D-19**.
 
 ### F / G. Flood occurrence and flood location — **NO SPATIAL SKILL DEMONSTRATED. ⚠ PRIOR CLAIM CORRECTED.**
 
@@ -685,3 +711,117 @@ in any `.jsx` file.
 
 **Net effect on SR statuses:** none changed by this pass — it is a confirmation pass on top of the already
 corrected/fixed state in §2.I and `docs/SIH_REQUIREMENTS.md` §6, not a source of new findings.
+
+---
+
+## 10. 2026-09-14 real-data verification + gridded-rainfall pass
+
+### ⚠ 10.0 FIGURES ELSEWHERE IN THIS DOCUMENT ARE SUPERSEDED
+
+Manhole plan area changed from an invented blanket **1.5 m²** to **IS 4111 (Part 1)-1986** depth bands
+(0.72 / 1.08 / 1.26 m²; 24 / 980 / 229 nodes) — a **−26.2 %** change in total chamber storage
+(1,849.5 → 1,364.2 m²). See `docs/DECISIONS.md` D-17. This is a physics change and it moved the results.
+Validation gate, `heavy` + 70 % blockage, 180 min:
+
+| Quantity | Before (1.5 m² blanket) | After (IS 4111 banded) |
+|---|---|---|
+| Peak depth | 268.72 cm | **292.27 cm** |
+| Peak surcharging nodes | 424 | **459** |
+| Total surcharge | 124,981 m³ | **133,020 m³** |
+| Mass-balance error | −3.7706e-12 % | **−3.1460e-12 %** |
+
+Direction is physically coherent (less chamber storage → less buffering → more surcharge), mass is still
+conserved, and the full suite passes. **Every depth/surcharge figure in §1, §4 and §5 of this document
+predates this change and was computed with the old 1.5 m².** They are retained as the record of what was
+measured at the time, not silently rewritten; re-run the relevant script to refresh any figure you intend
+to quote.
+
+### 10.1 Spatial rainfall: the SR-01 architectural blocker is closed — NUMERICALLY VALIDATED
+
+D-15 recorded that `RainfallScenario` was `[T]`-only, so rainfall was spatially uniform **by construction for
+every provider** — radar access alone could never have satisfied SR-01. That is now fixed:
+`intensity_field_mm_h` `[T, ny, nx]` + `field_grid`, `intensity_field_at()`, a field-aware `runoff_fn`, an
+`is_spatial` branch in the engine, and `floodnet/rainfall/gridded.py` for reprojection/resampling.
+
+**Backward-compatibility evidence (uniform scenarios must be unchanged):**
+- `intensity_at()` reproduces the previous inline `searchsorted` lookup on **1,509/1,509** sampled times.
+- A constant field reproduces the scalar runoff path's total **exactly** (rel. diff 0.0; max per-cell
+  difference 8.7e-19, pure floating-point summation-order noise) — the scalar branch is byte-identical source.
+- Full-pilot `heavy` + 70 % blockage run reproduces the documented engine-path peak depth and mass-balance
+  error **to the last digit** (`context.md` §10's 268.7231779098511 cm / −3.770585409371645e-12 %),
+  *before* the separate IS 4111 change above.
+
+**Spatial-path evidence (the field must actually reach the physics):**
+- A spatial storm and a uniform storm carrying the **identical total rain volume — 58,213.6 m³ each** —
+  produce **different flooding**: 3,469 of 62,220 cells differ by >1 cm, max per-cell difference **39.5 cm**,
+  peak depth 79.2 vs 74.5 cm. Both conserve mass (−3.4e-13 % and +2.3e-13 %). Same water, different
+  distribution, different flood pattern — which is precisely the behaviour SR-01/SR-05 exist to demand.
+- End-to-end through the real API: `POST /api/simulate {"scenario_id":"synthetic_spatial"}` → HTTP 200,
+  field shape `[7, 255, 244]` on the real pilot grid, mass error −3.2e-13 %.
+- The engine **refuses** a field whose grid doesn't match the terrain grid (tested) rather than silently
+  regridding and hiding a CRS/extent mismatch.
+- 24 new tests in `backend/tests/test_spatial_rainfall.py`; suite now **193 passed, 5 skipped, 0 failed**.
+
+**This is numerical/architectural validation, not forecast skill.** It proves a gridded field is transported
+and routed correctly. It says nothing about whether any rainfall field is *correct* — §2.D still stands.
+
+### 10.2 Gridded rainfall SOURCES: verified, and the honest resolution verdict
+
+Eight candidate paths were checked against their official pages (full table and rejection reasons in
+`docs/DECISIONS.md` D-16). Selected: **GPM IMERG Early V07**, implemented as `IMERGSatelliteProvider`,
+credential-gated on `EARTHDATA_TOKEN`, raising `ProviderUnavailable` (never a fabricated value) without it.
+
+Two findings that must travel with any mention of it:
+
+1. **It is not radar.** IMERG is passive-microwave + geostationary-infrared, intercalibrated against a
+   spaceborne-radar (GPM DPR/CORRA) reference. Calling it "radar-derived" unqualified would be misleading;
+   the provider's own docstring and provenance note say so explicitly, and a test asserts the docstring
+   contains "NOT ground radar" / "NOT a radar nowcast".
+2. **It cannot resolve this pilot.** 0.1° ≈ 11.1 × 10.5 km (~117 km²) at 19 °N; the pilot (~6 km²) sits
+   **entirely inside one cell**, not even straddling a boundary. `gridded.describe_effective_resolution()`
+   detects this and writes *"CANNOT resolve structure inside the pilot"* into the scenario provenance
+   automatically — a test asserts that string appears for a 0.1° source and that a ~100 m source instead
+   reports `resolves_within_pilot: True`.
+
+**Network path verification status:** product, resolution, cadence, CC0 licence, host and auth scheme were
+verified against NASA's pages; the GES DISC directory/filename construction follows documented convention but
+has **never been executed against the live service** (no Earthdata credential in this environment) — the same
+honest status `IMDObservationProvider` carries.
+
+### 10.3 Estimated inputs: what was upgraded, what could not be
+
+| Input | Before | After | Verdict |
+|---|---|---|---|
+| Manhole plan area | invented blanket 1.5 m² | IS 4111-1:1986 cl. 3.3.2/3.3.3 depth bands | **UPGRADED** (still tagged ESTIMATED — see D-17) |
+| Manning's n | 0.013 blanket (Chow 1959) | unchanged | **No Indian source verifiable** — IRC:SP:50-2013 has no n table; CPHEEO unreachable. Brick arches deliberately NOT changed |
+| Inlet capture capacity | 0.05 m³/s blanket | unchanged | **No Indian standard states one** — IS 7740/IRC:SP:50 give geometry only |
+| DEM | 20 cm contours → 10 m DTM | unchanged | **Already the best available** — every free alternative is a 30 m *surface* model |
+| Runoff coefficient | C_imp 0.95 / C_perv 0.35 | unchanged | Real Mumbai source found (IRC:SP:50-2013 §6.4.1: C=1.0 fully developed) but **not applied** — design coefficient, needs owner decision + validation gate |
+| Imperviousness raster | OSM-geometry rule, flat 0.6 default | unchanged | ESA WorldCover 10 m (CC BY 4.0) verified available; **not applied** — new ingestion path + full rebuild |
+| Tidal/tailwater boundary | none | unchanged | **Still MISSING** — PSMSL gives monthly means only; INCOIS endpoints dead; BMC calendar supports a *scenario*, not a series |
+
+Nothing in this table was changed on the strength of a number that merely exists online; each upgrade required
+a source that actually describes that physical quantity, and the ones that lacked it were left alone and
+labelled.
+
+## 11. 2026-09-21 FINAL ENGINEERING PASS — what the new tests do and do not show
+
+Nothing in this pass changes a validation claim. **FloodNet still has no independent street-level flood-depth
+observations, so no depth accuracy is claimed.** Also unchanged: the DEM was interpolated from MCGM contours *and*
+manhole ground levels, so comparing it with those manhole levels is not an independent accuracy check; the SWMM
+adapter is a cross-check harness, not a validation; nearest-drain state is reported as "nearby drainage network …",
+never as the cause of a street's flooding.
+
+New regression suites are CONSISTENCY guards, not accuracy tests:
+- `tests/test_scientific_regression.py` — 0–180 min in even 5-min frames; no NaN/Inf/negative anywhere; water balance
+  closes and its terms sum to the rain; bit-identical replay; doubling rain doubles inflow and never reduces stored
+  water, peak street depth or surcharge; zero rain stays dry; blockage what-if holds water back; every drainage node
+  reaches an outfall; the 26 July 2005 replay runs on the real pilot and stays tagged REAL.
+- `tests/test_final_api_radar_hotspots.py` — no-rain radar image, off-legend colour rejected, radar image → grid →
+  engine end-to-end, hotspot metrics equal the frames they summarise, deterministic ranking, routing changes as the
+  flood develops, status codes, small concurrent read load.
+- `tests/test_imd_token_and_failover.py` — every IMD failure mode falls over to the next source with an explicit label.
+
+Status vocabulary shown to operators: LIVE (IMD observation + persistence estimate) · RADAR-DERIVED (image-derived
+estimate, experimental) · FORECAST (ECMWF NWP) · CACHED (last good field, aged, never relabelled) · DEMO (deterministic
+synthetic scenario). Hotspot numbers are model output for the run on screen and say so in the API (`basis`).

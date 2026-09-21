@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
+import { apiUrl } from '../../api/client.js'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import {
   ALERT_LABEL, ADVISORY_LABEL, CATEGORY_COLOR,
@@ -12,7 +13,7 @@ import styles from './AlertsPanel.module.css'
 // session -- client.js is owned by another agent right now. Shape asserted by
 // backend/tests/test_alerts_cap.py::test_alert_endpoint_contract.
 async function fetchCapDraft(runId) {
-  const res = await fetch(`/api/simulation/${encodeURIComponent(runId)}/alert`)
+  const res = await fetch(apiUrl(`/api/simulation/${encodeURIComponent(runId)}/alert`))
   let data = null
   try {
     data = await res.json()
@@ -130,7 +131,7 @@ export default function AlertsPanel() {
   }
 
   return (
-    <section className={styles.section}>
+    <section className={styles.section} data-tour="panel-alerts">
       <div className="panel-heading">
         Incident Advisories {alerts.length > 0 && <span className={styles.count}>({alerts.length})</span>}
       </div>
@@ -141,12 +142,15 @@ export default function AlertsPanel() {
         <div className={styles.empty}>No critical thresholds crossed — conditions remain within manageable levels.</div>
       ) : (
         <ul className={styles.list}>
-          {alerts.map((a) => {
+          {alerts.map((a, alertIdx) => {
             const stateLabel = getStateTag(a.state)
             const isActive = a.state === 'ACTIVE'
             return (
               <li
                 key={a.id}
+                // The guided briefing spotlights the top-priority alert specifically. computeAllAlerts()
+                // already returns these most-severe-first, so index 0 IS the highest-priority real alert.
+                data-tour={alertIdx === 0 ? 'alert-top' : undefined}
                 className={styles.alert}
                 style={{ borderLeftColor: a.color || 'var(--border)' }}
                 onClick={() => handleAlertClick(a)}
@@ -217,15 +221,16 @@ export default function AlertsPanel() {
         <>
           <div className={`panel-heading ${styles.capHeading}`}>CAP alert draft</div>
 
-          <div className={styles.capNotIssued}>
-            <div className={styles.capNotIssuedTitle}>⛔ NOT AN ISSUED WARNING</div>
-            FloodNet is <b>not a designated alerting authority</b>. It cannot and does not send alerts to
-            citizens: it has no NDMA SACHET credential or submission path, no SMS or cell-broadcast
-            channel, and no phone numbers or subscriber data. What this button produces is a
-            <b> machine-generated draft</b> in the OASIS CAP 1.2 format — carrying{' '}
-            <code>status=Draft</code>, which that specification defines as “a preliminary template or
-            draft, not actionable in its current form” — for an authorised officer to review, edit and, if
-            they judge it warranted, issue through their own agency’s system under their own authority.
+          <div className={styles.capStatus}>
+            <span className={styles.capStatusBadge}>DRAFT • NOT ISSUED</span>
+            <span className={styles.capStatusNote}>Requires authorized government issuance.</span>
+            <details className={styles.capWhy}>
+              <summary>Why?</summary>
+              FloodNet is not a designated alerting authority: it has no NDMA SACHET credential, no SMS or
+              cell-broadcast channel and no subscriber data. The button produces a machine-generated OASIS
+              CAP 1.2 file with <code>status=Draft</code> for an authorised officer to review, edit and issue
+              through their own agency.
+            </details>
           </div>
 
           <button

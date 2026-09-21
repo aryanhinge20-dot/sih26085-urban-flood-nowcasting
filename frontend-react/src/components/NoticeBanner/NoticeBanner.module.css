@@ -1,7 +1,7 @@
 /* Dark notice banner — floated pill above map */
 .banner {
   position: absolute;
-  top: 72px;
+  top: 90px; /* clears the pipeline story strip */
   left: 50%;
   transform: translateX(-50%);
   z-index: 1200;

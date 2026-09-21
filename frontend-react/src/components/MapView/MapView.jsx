@@ -143,6 +143,7 @@ export default function MapView() {
     frame, selectedSegId, selectSegment,
     route, pickPoint, alternatives, alternativesStale, selectAlternative,
     layers, terrainOpacity, depthOpacity,
+    mapCommand, setMapView,
   } = useFloodNet()
 
   const pickPointRef = useRef(pickPoint)
@@ -161,6 +162,10 @@ export default function MapView() {
   // ---------------------------------------------------------------- init (once)
   useEffect(() => {
     const map = L.map(elRef.current, { zoomControl: false, preferCanvas: true }).setView(PILOT_CENTER, 15)
+    // shared with the 3D terrain view so it opens on the place the operator was looking at
+    const publishView = () => { const c = map.getCenter(); setMapView({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }) }
+    map.on('moveend', publishView)
+    publishView()
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors',
@@ -178,7 +183,7 @@ export default function MapView() {
       map.remove()
       mapRef.current = null
     }
-  }, [])
+  }, [setMapView])
 
   // ---------------------------------------------------------------- layer visibility
   useEffect(() => {
@@ -523,10 +528,89 @@ export default function MapView() {
     }
   }, [route, alternatives, alternativesStale, selectAlternative])
 
+  // ---------------------------------------------------------------- guided-tour command bus
+  // ADDITIVE. The guided briefing needs to fly the map and pulse specific features, but Leaflet objects live
+  // in this component's refs by design. Rather than exporting those refs (or letting narration text poke the
+  // DOM), callers push a declarative command onto Context and this effect executes it here, where the refs
+  // already are. Unknown command types are ignored. Highlights are purely visual: they add a CSS class to
+  // the existing layer's element and never mutate `selectedSegId`, layer visibility, or any model state, so
+  // a briefing can never change what the dashboard is actually showing.
+  const highlightedRef = useRef([])
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapCommand) return
+
+    const clearHighlights = () => {
+      for (const el of highlightedRef.current) el?.classList?.remove('tour-highlight')
+      highlightedRef.current = []
+    }
+
+    const pulse = (index, ids) => {
+      clearHighlights()
+      const layers = []
+      for (const id of ids || []) {
+        const entry = index.get(String(id))
+        const layer = entry?.layer ?? entry
+        const el = layer?.getElement?.()
+        if (el) {
+          el.classList.add('tour-highlight')
+          highlightedRef.current.push(el)
+        }
+        if (layer) layers.push(layer)
+      }
+      return layers
+    }
+
+    try {
+      switch (mapCommand.type) {
+        case 'MAP_FLY_TO': {
+          const { lat, lng, zoom } = mapCommand
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            map.flyTo([lat, lng], Number.isFinite(zoom) ? zoom : map.getZoom(), { duration: 1.1 })
+          }
+          break
+        }
+        case 'HIGHLIGHT_SEGMENTS': {
+          const layers = pulse(segIndexRef.current, mapCommand.ids)
+          if (mapCommand.fit !== false && layers.length) {
+            const group = L.featureGroup(layers)
+            map.flyToBounds(group.getBounds().pad(0.55), { maxZoom: 17, duration: 1.1 })
+          }
+          break
+        }
+        case 'HIGHLIGHT_NODES': {
+          const layers = pulse(nodeIndexRef.current, mapCommand.ids)
+          if (mapCommand.fit !== false && layers.length) {
+            const group = L.featureGroup(layers)
+            map.flyToBounds(group.getBounds().pad(0.8), { maxZoom: 17, duration: 1.1 })
+          }
+          break
+        }
+        case 'CLEAR_HIGHLIGHT':
+          clearHighlights()
+          break
+        default:
+          break
+      }
+    } catch {
+      /* a command must never break the map; worst case it does nothing */
+    }
+  }, [mapCommand])
+
+  // drop highlight classes if this component unmounts mid-briefing
+  useEffect(() => () => {
+    for (const el of highlightedRef.current) el?.classList?.remove('tour-highlight')
+    highlightedRef.current = []
+  }, [])
+
   const legendRows = DEFAULT_BANDS_CM.map(([limit, label], i) => {
     const lo = i === 0 ? 0 : DEFAULT_BANDS_CM[i - 1][0]
     return { sev: label, text: `${lo}–${limit} cm` }
   }).concat([{ sev: 'critical', text: `≥${DEFAULT_BANDS_CM[DEFAULT_BANDS_CM.length - 1][0]} cm` }])
+
+  // A run is on screen but no street reaches 1 cm at this time: say so, rather than show an empty map.
+  const noFlooding = Boolean(frame?.streets?.features) && layers.streets
+    && !frame.streets.features.some((f) => (f.properties?.depth_cm || 0) >= 1)
 
   return (
     <>
@@ -539,6 +623,7 @@ export default function MapView() {
             {SEVERITY_LABEL[sev]} <span style={{ color: 'var(--text-faint)' }}>&nbsp;{text}</span>
           </div>
         ))}
+        {noFlooding && <div className={styles.legendEmpty}>No flooded streets at this time</div>}
       </div>
     </>
   )

@@ -87,6 +87,79 @@ in full in `docs/VALIDATION.md` and `docs/SIH_REQUIREMENTS.md` §6 rather than d
 
 ---
 
+## 0b. 2026-09-14 real-data + gridded-rainfall pass (SUPERSEDES SOME NUMBERS BELOW)
+
+> **⚠ Figures in §2–§5, §10 and §12 below predate this pass.** Manhole plan area changed from an invented
+> blanket 1.5 m² to IS 4111 (Part 1)-1986 depth bands (−26.2 % chamber storage), which moved the physics:
+> peak depth **268.72 → 292.27 cm**, peak surcharging nodes **424 → 459**, total surcharge
+> **124,981 → 133,020 m³** (`heavy` + 70 % blockage, 180 min); mass balance still −3.15e-12 %. Those older
+> figures are left in place as the record of what was measured then, not silently rewritten. See
+> `docs/DECISIONS.md` D-17 and `docs/VALIDATION.md` §10.0.
+
+- **The SR-01 architectural blocker (D-15) is CLOSED — `IMPLEMENTED` + `VERIFIED`.** `RainfallScenario` now
+  accepts an optional `intensity_field_mm_h` `[T, ny, nx]` + `field_grid`; `runoff_fn` takes a scalar *or* a
+  per-cell field; `engine.run_simulation` branches on `scenario.is_spatial` and **refuses** a field whose grid
+  doesn't match the terrain grid; new `floodnet/rainfall/gridded.py` does the reprojection/resampling.
+  Uniform scenarios keep the byte-identical original path (`intensity_at` equivalent on 1,509/1,509 samples;
+  constant field reproduces the scalar runoff total exactly; pre-IS-4111 full-pilot run reproduced §10's
+  documented peak depth and mass error to the last digit). **Proof the field reaches the physics:** a spatial
+  storm and a uniform storm with the *identical* total rain volume (58,213.6 m³ each) produce different
+  flooding — 3,469 cells differ by >1 cm, max difference 39.5 cm. 24 new tests.
+- **Gridded source selected: GPM IMERG Early V07** (`IMERGSatelliteProvider`, credential-gated on
+  `EARTHDATA_TOKEN`, raises `ProviderUnavailable` without it). Two things must always be said with it:
+  **(a) it is NOT ground radar** (satellite PMW/IR intercalibrated against a spaceborne-radar reference), and
+  **(b) at 0.1° (~11 km) the whole pilot sits inside ONE source cell**, so it adds real provenance and real
+  temporal behaviour but **zero spatial variation at pilot scale**. The code detects and writes this into
+  provenance automatically. Network path implemented but **never executed against the live service** (no
+  credential) — same honest status as the IMD provider. `BLOCKED` on credential, not on architecture.
+- **RADAR INTEGRATION BLOCKED BY DATA ACCESS — `BLOCKED`, and the reason is now narrow and precise.** A
+  final exhaustive search (nine avenues, radar-only, satellite/NWP/gauge/tiles excluded) confirmed there is
+  **no genuinely radar-derived, Mumbai-covering, legally-usable, programmatically-obtainable rainfall dataset
+  with the temporal continuity a 0–3 h nowcast needs.** Nothing was implemented as a substitute. The engine
+  can ingest a gridded field today — **the blocker is entirely data access and licensing, not architecture.**
+  Two near-misses, both genuinely radar, both correctly rejected: **CEDA INCOMPASS v2** (real IMD DWR data,
+  Mumbai included, OGL v3, downloadable — but a convective-cell *object table*, not a field; reconstructing a
+  grid from it would mean inventing intra-cell structure) and **GPM DPR** (real spaceborne precipitation
+  radar, mm/hr, open — but overpasses days apart, and its 5 km footprint is larger than the whole pilot).
+  Mumbai has two IMD radars (Colaba S-band, Veravali C-band); the specific blocker on IMD's own supply route
+  is a **broken TLS certificate chain on `radarapi.imd.gov.in`**. Newly established: IMD registration is
+  **open to individuals/students** (not MoU-gated), and radar is **chargeable** (absent from the free-data
+  list). Full candidate table + the exact human action to unblock: `docs/DECISIONS.md` **D-19**.
+- **`synthetic_spatial`** — a clearly-labelled SYNTHETIC moving-storm field, wired through the API, exists
+  solely to exercise/test/demo the spatial pathway. It is **not radar, not observed, not a nowcast**, is
+  tagged SYNTHETIC, and a test asserts its provenance says so.
+- **Estimated inputs audited against official sources.** Upgraded: manhole plan area → IS 4111. Left alone,
+  with reasons recorded (D-18): Manning's n (no Indian source verifiable — the 62 brick arches were
+  deliberately **not** changed), inlet capture capacity (no Indian standard states one), DEM (all free
+  alternatives are coarser 30 m *surface* models — ours is better), tidal boundary (still `MISSING`).
+  Identified-but-not-applied, each needing an owner decision + validation gate: IRC:SP:50-2013 §6.4.1's
+  Mumbai runoff coefficient, and ESA WorldCover 10 m (CC BY 4.0) as a real imperviousness raster.
+- **Tests after this pass: 193 passed, 5 skipped, 0 failed** (was 169/4). `npm run build` clean,
+  `npm run lint` 0 errors.
+
+---
+
+## 0c. 2026-09-18 / 21 — IMD live access, radar-image path, technology story (SUPERSEDES PARTS OF §8)
+
+- **IMD API is live** (`VERIFIED` 2026-09-18, re-verified with a renewed token): `IMD_API_KEY` + `IMD_API_TOKEN`
+  (expires, renewed by hand) + IP-bound key. `current_wx`, station/district nowcast and district rainfall
+  return Mumbai rows. Live runs report `data_mode: MIXED` (REAL observation + ESTIMATED continuation).
+  Live smoke tests are opt-in: `RUN_LIVE_IMD=1`. Detail: `docs/LIVE_RAINFALL_AUDIT.md` §12.
+- **Radar** — `PARTIAL`, experimental: `IMDVeravaliSRIImageProvider` (`imd_sri`) decodes IMD's public SRI *image*
+  into a `[T, ny, nx]` field tagged `RADAR_IMAGE_DERIVED_ESTIMATE` (`docs/RADAR_SRI_IMAGE.md`, D-20). IMD's API
+  portal has no radar-product API. A gated advection nowcast on the decoded fields plus a source-aware horizon
+  (radar 0 → nowcast 5–30 min → ECMWF/persistence) is `IMPLEMENTED`, logic-tested, and **not yet exercised on
+  two consecutive real frames** (`docs/RADAR_NOWCAST_STATUS.md`, D-21). SR-01 stays `PARTIAL`.
+- **Tide** — `PLANNED`/undecided: no licensed machine-readable Mumbai source yet (`docs/TECHNOLOGY_EXPLAINER.md`, D-22).
+- **Frontend**: shared seven-stage technology story (landing cards, dashboard story strip, Demo Story on the
+  Guided Briefing engine), route A/B flood-exposure view (`docs/TECHNOLOGY_EXPLAINER.md`).
+- **Competitor evidence**: `docs/COMPETITIVE_VIDEO_ANALYSIS.md`.
+- **Final submission pass (2026-09-21)**: one operator-facing source mapping (`frontend-react/src/lib/sources.js`),
+  compact Sources / Alerts / Route panels, header source follows the active run, deployment split (Vercel static
+  frontend + container backend). **Current one-page status: `docs/FINAL_STATUS.md`; deployment: `docs/DEPLOYMENT.md`.**
+- **Tests at this point**: see §"Tests" in README / the latest run in the session report; earlier counts in
+  this file are historical.
+
 ## 1. What FloodNet does
 
 ```
@@ -331,11 +404,18 @@ the specialist's central claim**, which is why this is a refusal rather than a f
 - Licence is **unresolved and worse than recorded**: `disclaimer.php` asserts IMD copyright with **no
   grant**; the official route (`radarapi.imd.gov.in`) needs an account, a request and **payment**.
 
+> **SUPERSEDED 2026-09-18 / 21 (kept as history):** an experimental decoder of the public Mumbai-Veravali SRI
+> image, and a gated advection nowcast on its decoded fields, now exist — see §0c, D-20, D-21,
+> `docs/RADAR_SRI_IMAGE.md`, `docs/RADAR_NOWCAST_STATUS.md`. The licence question below is still open.
+
 **No radar decoder is being built. No image-capture job has been started** — harvesting copyrighted
 imagery on an unresolved licence was declined deliberately, despite an "every hour is lost" argument. The
 zero-cost unblocking step is a written enquiry to the Radar Division (`radarlab@gmail.com`) — a human action.
 
 ### The structural finding that reframes SR-01 — `PLANNED`, recorded as `D-15`
+
+> **SUPERSEDED 2026-09-14 (kept as history):** `RainfallScenario` now carries an optional `[T, ny, nx]`
+> field and the engine consumes it — see §0b and D-15 (resolved).
 
 `contracts.RainfallScenario.intensity_mm_h` is `[T]` and `intensity_at()` returns a single `float`, which
 `engine.run_simulation` passes to `runoff_fn`. **Rainfall is spatially uniform by construction for every

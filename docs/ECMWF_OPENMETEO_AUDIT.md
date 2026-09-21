@@ -13,6 +13,10 @@ per its own documentation, carrying no hourly/nowcast precipitation field regard
 endpoint is a free, no-key, documented, currently-working alternative that returns real hourly ECMWF model
 output -- used here as an explicitly temporary, explicitly-labelled stand-in while IMD access is pending.
 
+> **Update 2026-09-18:** IMD API access now works (`docs/LIVE_RAINFALL_AUDIT.md` §12). ECMWF is kept as the
+> forward-looking NWP source and as the 30–180 min tail of the radar-derived run; the text below is the
+> original record.
+
 **Explicit statement (required, verbatim):** ECMWF NWP via Open-Meteo is used as a temporary prototype
 rainfall forecast source while official IMD API access is pending. It is not an IMD radar nowcast.
 

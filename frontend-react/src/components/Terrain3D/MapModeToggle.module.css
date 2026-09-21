@@ -1,0 +1,27 @@
+/* bottom-centre of the map gap, just above the forecast timeline */
+.toggle {
+  position: absolute;
+  left: 50%;
+  bottom: 134px;
+  transform: translateX(-50%);
+  z-index: 810;
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bg-glass);
+}
+.btn {
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.btn:hover { color: var(--text); }
+.btnOn, .btnOn:hover { background: var(--accent); color: #fff; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

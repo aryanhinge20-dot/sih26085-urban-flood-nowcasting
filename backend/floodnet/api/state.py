@@ -134,6 +134,23 @@ def set_pilot(pilot: dict, data_mode: str) -> None:
 
 
 def data_mode() -> str:
+    """PILOT-level mode: whether the GIS/network inputs loaded from real sources (REAL) or the placeholder
+    fallback (DEMONSTRATION). Says nothing about the rainfall driving a particular run -- see run_data_mode."""
+    return _data_mode
+
+
+MIXED = "MIXED"
+
+
+def run_data_mode(res: Optional[SimulationResult]) -> str:
+    """RUN-level mode. A REAL pilot driven by an ESTIMATED rainfall series (the IMD live path: REAL station
+    observation + FloodNet's 3-hour persistence continuation) is MIXED -- reporting it as REAL would imply the
+    whole forecast input was observed. Every other run keeps the pilot mode, exactly as before."""
+    if res is None:
+        return _data_mode
+    rs = (res.provenance or {}).get("rainfall_source") or {}
+    if _data_mode == "REAL" and rs.get("data_mode") == "ESTIMATED":
+        return MIXED
     return _data_mode
 
 
@@ -329,6 +346,8 @@ def _run_live_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
     # FORECAST EXTENSION breakdown -- see RainfallSourceMeta.detail. Additive key; res.provenance["rainfall"]
     # (the scenario's own Provenance) is untouched, so nothing that already reads it needs to change.
     res.provenance["rainfall_source"] = meta.to_dict()
+    res.provenance["pilot_data_mode"] = _data_mode
+    res.provenance["data_mode"] = run_data_mode(res)
     return res
 
 
@@ -367,15 +386,81 @@ def _run_radar_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
     return res
 
 
+def _run_gridded_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
+    """scenario_id='imerg' or 'synthetic_spatial': sources that produce a genuine [T, ny, nx] rainfall FIELD.
+
+    Structurally identical to _run_live_scenario/_run_ecmwf_scenario, with one required difference: these
+    providers need the model grid, because resampling a gridded source onto the model grid is the provider's
+    responsibility, not the engine's (the engine refuses a field whose grid doesn't match -- see
+    simulation/engine.py). Everything else -- ProviderUnavailable propagating to HTTP 503, never substituting
+    another source under this label -- behaves exactly as the other real-source paths do.
+    """
+    from ..rainfall.provider import list_providers
+    pilot = get_pilot()
+    scen, meta = list_providers()[scenario_id].get(
+        scenario_id, grid=pilot["terrain"].grid, horizon_s=int(horizon_min) * 60)
+    res = _run_physics(scen, blockage, horizon_min, pilot)
+    res.provenance = dict(res.provenance)
+    res.provenance["rainfall_source"] = meta.to_dict()
+    res.provenance["pilot_data_mode"] = _data_mode
+    res.provenance["data_mode"] = run_data_mode(res)
+    return res
+
+
+from ..rainfall.source_manager import SourceManager, AUTO_ID, DEMO_ID, GOLDEN_SCENARIO_ID  # noqa: E402
+
+source_manager = SourceManager(cache_dir=config.REPO_DIR / "data" / "interim" / "last_good_rainfall")
+
+
+def _run_auto_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
+    """scenario_id='auto': best available rainfall with EXPLICIT failover (see rainfall/source_manager.py):
+    IMD live -> radar-derived -> ECMWF -> last-good cache -> deterministic demo. The chosen source, every failed
+    attempt and the resulting status label travel with the run; nothing is ever relabelled as live."""
+    from ..rainfall.provider import list_providers, LIVE_ID, IMD_SRI_ID, ECMWF_ID
+    from ..rainfall.source_manager import LIVE, RADAR, FORECAST
+    pilot = get_pilot()
+    scen, meta, _ = source_manager.resolve(
+        list_providers(), [(LIVE_ID, LIVE), (IMD_SRI_ID, RADAR), (ECMWF_ID, FORECAST)],
+        pilot["terrain"].grid, int(horizon_min) * 60, demo_scenario=pilot["scenarios"][GOLDEN_SCENARIO_ID])
+    res = _run_physics(scen, blockage, horizon_min, pilot)
+    res.provenance = dict(res.provenance)
+    res.provenance["rainfall_source"] = meta.to_dict()
+    res.provenance["pilot_data_mode"] = _data_mode
+    res.provenance["data_mode"] = run_data_mode(res)
+    return res
+
+
+def _run_demo_scenario(blockage: dict, horizon_min: int) -> SimulationResult:
+    """scenario_id='demo': the deterministic golden walkthrough (the `cloudburst` design storm), labelled DEMO."""
+    from dataclasses import replace
+    pilot = get_pilot()
+    scen = replace(pilot["scenarios"][GOLDEN_SCENARIO_ID], id=DEMO_ID)
+    res = _run_physics(scen, blockage, horizon_min, pilot)
+    res.provenance = dict(res.provenance)
+    res.provenance["rainfall_source"] = {
+        "source_type": "scenario", "source_name": scen.name, "timestamp": "N/A (demo scenario)",
+        "forecast_horizon_min": int(horizon_min), "resolution_min": 5, "data_mode": "SYNTHETIC",
+        "provenance": scen.provenance.to_dict(),
+        "detail": {"source_status": {"requested": DEMO_ID, "label": "DEMO", "source": DEMO_ID, "is_live": False,
+                                     "attempts": [], "cached": None, "fell_back": False}}}
+    return res
+
+
 def run_scenario(scenario_id: str, blockage: dict, horizon_min: int) -> SimulationResult:
     """Blocking; call via run_in_threadpool."""
-    from ..rainfall.provider import LIVE_ID, ECMWF_ID, RADAR_ID
-    if scenario_id == LIVE_ID:
+    from ..rainfall.provider import LIVE_ID, ECMWF_ID, RADAR_ID, IMERG_ID, SPATIAL_SYNTHETIC_ID, IMD_SRI_ID
+    if scenario_id == AUTO_ID:
+        res = _run_auto_scenario(blockage or {"mode": "none"}, int(horizon_min))
+    elif scenario_id == DEMO_ID:
+        res = _run_demo_scenario(blockage or {"mode": "none"}, int(horizon_min))
+    elif scenario_id == LIVE_ID:
         res = _run_live_scenario(blockage or {"mode": "none"}, int(horizon_min))
     elif scenario_id == ECMWF_ID:
         res = _run_ecmwf_scenario(blockage or {"mode": "none"}, int(horizon_min))
     elif scenario_id == RADAR_ID:
         res = _run_radar_scenario(blockage or {"mode": "none"}, int(horizon_min))
+    elif scenario_id in (IMERG_ID, SPATIAL_SYNTHETIC_ID, IMD_SRI_ID):
+        res = _run_gridded_scenario(scenario_id, blockage or {"mode": "none"}, int(horizon_min))
     else:
         cached = _run_scenario_cached(scenario_id, _canon_blockage(blockage), int(horizon_min))
         res = copy.copy(cached)  # fresh run_id/cache-slot per call; frames/mass_balance/provenance shared read-only

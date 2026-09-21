@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { FloodNetProvider } from './state/FloodNetContext.jsx'
+import { Suspense, lazy, useState, useEffect, useCallback } from 'react'
+import { FloodNetProvider, useFloodNet } from './state/FloodNetContext.jsx'
 import LandingPage from './components/LandingPage/LandingPage.jsx'
 import Header from './components/Header/Header.jsx'
 import MapView from './components/MapView/MapView.jsx'
@@ -14,6 +14,14 @@ import ProvenancePanel from './components/ProvenancePanel/ProvenancePanel.jsx'
 import ForecastTimeline from './components/ForecastTimeline/ForecastTimeline.jsx'
 import LoadingOverlay from './components/LoadingOverlay/LoadingOverlay.jsx'
 import NoticeBanner from './components/NoticeBanner/NoticeBanner.jsx'
+import GuidedBriefing from './components/GuidedBriefing/GuidedBriefing.jsx'
+import StoryStrip from './components/StoryStrip/StoryStrip.jsx'
+import HotspotsCard from './components/HotspotsCard/HotspotsCard.jsx'
+import MapModeToggle from './components/Terrain3D/MapModeToggle.jsx'
+
+// three.js is fetched only when 3D terrain is first opened
+const Terrain3D = lazy(() => import('./components/Terrain3D/Terrain3D.jsx'))
+import ExploreTour from './components/ExploreTour/ExploreTour.jsx'
 import styles from './App.module.css'
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
@@ -45,10 +53,13 @@ const RIGHT_TABS = [
 ]
 
 function RightPanel() {
-  const [activeTab, setActiveTab] = useState('overview')
+  // The selected tab lives in Context (not local state) so a guided briefing can open the Alerts /
+  // Why-flooded / Route tab as a narrated step without reaching into the DOM to click a tab button.
+  // Rendering and behaviour are otherwise unchanged.
+  const { activeRightTab: activeTab, setActiveRightTab: setActiveTab } = useFloodNet()
 
   return (
-    <aside className={`${styles.rightPanel} glass-panel`}>
+    <aside className={`${styles.rightPanel} glass-panel`} data-tour="right-panel">
       <div className={styles.tabStrip} role="tablist" aria-label="Right panel sections">
         {RIGHT_TABS.map((t) => (
           <button
@@ -72,6 +83,7 @@ function RightPanel() {
         className={`${styles.tabPanel} scroll-y ${activeTab === 'overview' ? styles.tabPanelActive : ''}`}
       >
         <MetricsPanel />
+        <HotspotsCard />
         <FloodedStreets />
       </div>
 
@@ -147,19 +159,42 @@ function MainApp() {
     setView('landing')
   }, [])
 
+  // "Explore FloodNet" homepage tour. It starts on the landing page and then walks into the real control
+  // centre, so its active flag lives here — the only component that owns view navigation.
+  const [exploring, setExploring] = useState(false)
+  // A "How FloodNet Works" card on the landing page opens that stage in the live dashboard.
+  const [pendingStage, setPendingStage] = useState(null)
+  // The tour's five tab steps need to open the real right-panel tabs; that selection lives in Context.
+  const { setActiveRightTab, mapMode, setMapMode } = useFloodNet()
+
   return (
     <div className={view === 'landing' ? styles.landingContainer : styles.dashboardContainer}>
       {view === 'landing' ? (
-        <LandingPage onEnter={navigateToDashboard} isTransitioning={isTransitioning} />
+        <LandingPage
+          onEnter={navigateToDashboard}
+          onExplore={() => setExploring(true)}
+          onOpenStage={(id) => { setPendingStage(id); navigateToDashboard() }}
+          isTransitioning={isTransitioning}
+        />
       ) : (
         <div className={styles.root}>
-          <div className={styles.mapLayer}>
-            <MapView />
+          <div className={styles.mapLayer} data-tour="map">
+            {/* Leaflet stays mounted (hidden) in 3D so returning to 2D restores the exact view */}
+            <div className={styles.mapFill} style={mapMode === '3d' ? { visibility: 'hidden' } : undefined}>
+              <MapView />
+            </div>
+            {mapMode === '3d' && (
+              <Suspense fallback={<div className={styles.mapLoading}>Loading 3D terrain…</div>}>
+                <Terrain3D onClose={() => setMapMode('2d')} />
+              </Suspense>
+            )}
           </div>
+          <MapModeToggle />
 
           <Header onToggleHome={navigateToLanding} isHomeActive={false} />
+          <StoryStrip openStage={pendingStage} onOpened={() => setPendingStage(null)} />
 
-          <aside className={`${styles.leftPanel} glass-panel scroll-y`}>
+          <aside className={`${styles.leftPanel} glass-panel scroll-y`} data-tour="left-panel">
             <ScenarioPanel />
             <LayerControl />
           </aside>
@@ -168,9 +203,19 @@ function MainApp() {
 
           <ForecastTimeline />
           <NoticeBanner />
+          <GuidedBriefing />
           <LoadingOverlay />
         </div>
       )}
+
+      <ExploreTour
+        active={exploring}
+        view={view}
+        onGoDashboard={navigateToDashboard}
+        onGoLanding={navigateToLanding}
+        setTab={setActiveRightTab}
+        onClose={() => setExploring(false)}
+      />
     </div>
   )
 }

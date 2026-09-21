@@ -50,7 +50,10 @@ def test_status():
         # "radar_nowcast" = the IMD radar integration boundary, always available=False (see D-14);
         # "external_nowcast" (the deprecated inert stub) is never listed at all.
         assert entry["source_type"] in ("scenario", "historical_replay", "live_observation",
-                                        "ecmwf_forecast", "radar_nowcast")
+                                        "ecmwf_forecast", "radar_nowcast", "radar_image_derived")
+        # the experimental SRI-image source is an ESTIMATE, never a nowcast and never REAL
+        if entry["source_type"] == "radar_image_derived":
+            assert entry["data_mode"] == "ESTIMATED" and "nowcast" not in entry["source_name"].lower()
         if entry["source_type"] == "radar_nowcast":
             assert entry["available"] is False and entry["reason"].startswith("ACCESS PENDING")
 

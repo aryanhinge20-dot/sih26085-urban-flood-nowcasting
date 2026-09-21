@@ -417,3 +417,37 @@
   color: var(--text-faint);
 }
 .capFooter b { color: var(--text-dim); }
+
+/* compact CAP status: the alert cards stay the dominant element of this panel */
+.capStatus {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 6px 0 8px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.capStatusBadge {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #A11F33;
+  background: rgba(196, 39, 61, 0.08);
+  border: 1px solid rgba(196, 39, 61, 0.30);
+}
+.capStatusNote { flex: 1 1 auto; }
+.capWhy { flex: 1 1 100%; line-height: 1.45; }
+.capWhy summary {
+  display: inline-block;
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--text);
+  list-style: none;
+  text-decoration: underline dotted;
+}
+.capWhy summary::-webkit-details-marker { display: none; }
+.capWhy[open] summary { margin-bottom: 4px; }

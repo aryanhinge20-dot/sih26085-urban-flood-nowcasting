@@ -282,6 +282,7 @@ select option { background: #FFFFFF; color: var(--text); }
 .tag-SYNTHETIC   { background: rgba(184, 135, 74, 0.14); color: #96692F; border: 1px solid rgba(184,135,74,0.35); }
 .tag-DEMONSTRATION { background: rgba(139, 95, 176, 0.12); color: #7A4A9C; border: 1px solid rgba(139,95,176,0.32); }
 .tag-NWP         { background: rgba(139, 95, 176, 0.12);  color: #7A4A9C; border: 1px solid rgba(139,95,176,0.32); }
+.tag-RADAR       { background: rgba(196, 39, 61, 0.09);  color: #A11F33; border: 1px solid rgba(196,39,61,0.30); }
 .tag-UNKNOWN     { background: rgba(43, 33, 24, 0.05);    color: var(--text-faint); border: 1px solid var(--border); }
 
 /* ================================================================ severity badges */
@@ -374,10 +375,28 @@ select option { background: #FFFFFF; color: var(--text); }
   z-index: 1;
 }
 
+/* ================================================================ guided tour: map feature highlight
+   Applied by MapView's guided-tour command effect to an EXISTING Leaflet layer's SVG element, so a briefing
+   can draw attention to a real street segment or drainage node without changing its data-driven colour,
+   the current selection, or layer visibility. Purely additive and removed when the briefing moves on. */
+.tour-highlight {
+  stroke: var(--accent) !important;
+  stroke-width: 7 !important;
+  stroke-opacity: 1 !important;
+  filter: drop-shadow(0 0 5px rgba(122, 34, 49, 0.55));
+  animation: tour-feature-pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes tour-feature-pulse {
+  0%, 100% { stroke-opacity: 1; }
+  50%      { stroke-opacity: 0.55; }
+}
+
 /* ================================================================ media / reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+  .tour-highlight { animation: none !important; }
 }

@@ -130,3 +130,12 @@
   border-radius: 2px;
   flex: 0 0 auto;
 }
+
+.legendEmpty {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  color: #1f8a4c;
+}
