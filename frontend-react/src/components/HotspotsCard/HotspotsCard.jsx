@@ -1,8 +1,6 @@
-// Flood Hotspots — operational summary of the run on screen, from GET /api/simulation/{run_id}/hotspots
-// (backend/floodnet/analysis/hotspots.py). Model output only; clicking a hotspot selects that street.
-import { useEffect, useState } from 'react'
+// Flood Hotspots — operational summary of the run on screen (backend/floodnet/analysis/hotspots.py), delivered
+// inside the simulation response itself. Model output only; clicking a hotspot selects that street.
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
-import { getFloodIntelligence } from '../../api/client.js'
 import { fmt, shortId } from '../../lib/format.js'
 import { SEVERITY_COLOR } from '../../lib/severity.js'
 import styles from './HotspotsCard.module.css'
@@ -13,18 +11,8 @@ const tPlus = (t) => (t == null ? '—' : `T+${Math.round(t)}`)
 
 export default function HotspotsCard() {
   const { run, isStale, selectSegment, setCurrentT, issueMapCommand } = useFloodNet()
-  const runId = run && !isStale ? run.run_id : null
-  const [state, setState] = useState({ runId: null, data: null })
-
-  useEffect(() => {
-    if (!runId) return undefined
-    let alive = true
-    getFloodIntelligence(runId).then((data) => alive && setState({ runId, data })).catch(() => alive && setState({ runId, data: null }))
-    return () => { alive = false }
-  }, [runId])
-
-  const data = state.runId === runId ? state.data : null
-  if (!runId || !data) return null
+  const data = run && !isStale ? run.hotspots : null
+  if (!data) return null
 
   const open = (h) => {
     setCurrentT(h.peak_t_min)

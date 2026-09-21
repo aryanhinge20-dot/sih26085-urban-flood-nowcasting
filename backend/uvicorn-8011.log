@@ -1,0 +1,78 @@
+INFO:     Uvicorn running on http://127.0.0.1:8011 (Press CTRL+C to quit)
+INFO:     Started parent process [29900]
+INFO:     Started server process [23228]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Started server process [10528]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Started server process [33348]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:50319 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50345 - "GET /api/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53715 - "GET /static/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62330 - "GET /static/assets/index-fSdY2Pne.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57346 - "GET /static/assets/index-BAhpPKF2.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60421 - "GET /api/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54520 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57925 - "GET /api/provenance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54520 - "GET /api/hotspots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50620 - "GET /api/meta HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53186 - "GET /api/roads HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54520 - "GET /static/favicon.ico HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57925 - "GET /api/terrain HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56242 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60421 - "GET /api/topology HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64343 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63568 - "POST /api/simulate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63568 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60439 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56271 - "POST /api/simulate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53734 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63530 - "POST /api/simulate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63530 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57328 - "POST /api/simulate HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:57328 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54642 - "GET /static/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54642 - "GET /static/assets/index-BAhpPKF2.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:49452 - "GET /static/assets/index-fSdY2Pne.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:54642 - "GET /api/meta HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49452 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51715 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54642 - "GET /api/topology HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59065 - "GET /api/roads HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53133 - "GET /api/provenance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58793 - "GET /api/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49452 - "GET /api/hotspots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51715 - "GET /api/terrain HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50841 - "GET /static/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61488 - "GET /static/assets/index-fSdY2Pne.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50841 - "GET /static/assets/index-BAhpPKF2.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61439 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49600 - "GET /api/meta HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57054 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56828 - "GET /api/provenance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57054 - "GET /api/hotspots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49600 - "GET /api/terrain HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49600 - "GET /static/favicon.ico HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53401 - "GET /api/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56935 - "GET /api/roads HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61439 - "GET /api/topology HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60407 - "POST /api/simulate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62058 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62058 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56112 - "POST /api/simulate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56112 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53050 - "GET /static/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65125 - "GET /static/assets/index-fSdY2Pne.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:53050 - "GET /static/assets/index-BAhpPKF2.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:65125 - "GET /api/meta HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59326 - "GET /api/provenance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53050 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59326 - "GET /api/hotspots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65125 - "GET /api/topology HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51937 - "GET /api/roads HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64740 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63955 - "GET /api/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53050 - "GET /api/terrain HTTP/1.1" 200 OK

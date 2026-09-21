@@ -35,7 +35,7 @@ def test_secrets_and_bulk_never_ship():
     for entry in (".env", ".env.*", "backend/.venv/", "backend/tests/", "data/raw/"):
         assert entry in ignore
     fn = json.loads((REPO / "vercel.json").read_text(encoding="utf-8"))["functions"]["app.py"]
-    assert ".env" in fn["excludeFiles"] and fn["maxDuration"] == 800        # Pro maximum; Static IPs need Pro anyway
+    assert ".env" in fn["excludeFiles"] and fn["maxDuration"] <= 300        # Hobby plan maximum
     cfg = json.loads((REPO / "vercel.json").read_text(encoding="utf-8"))
     assert "VITE_BASE=/" in cfg["buildCommand"] and cfg["regions"] == ["bom1"]   # Static IP region = function region
 

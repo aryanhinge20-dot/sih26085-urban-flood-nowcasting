@@ -1,6 +1,7 @@
 import { refreshDataStatus } from '../lib/useDataStatus.js'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api/client.js'
+import { decodeRun, buildFrame, buildSeries, explainSegment as explainFromRun, frameIndex, frameDepths, wetSeries } from '../lib/runBundle.js'
 
 const FloodNetContext = createContext(null)
 
@@ -253,6 +254,7 @@ export function FloodNetProvider({ children }) {
 
   const applyRun = useCallback((res) => {
     framesRef.current = new Map()
+    setFrame(null)                  // never show the previous run's frame under the new run
     setRun(res)
     setCompareResult(null)
     setSeries(null)
@@ -277,13 +279,13 @@ export function FloodNetProvider({ children }) {
       setSimError(null)
       startStageCycle()
       try {
-        const res = await api.simulate({ scenarioId, blockage, horizonMin })
+        // The response is the COMPLETE run (backend/floodnet/api/bundle.py); it is decoded before the run is
+        // shown, so "Complete" always means the map, timeline and panels have their data. No follow-up
+        // request needs the server that computed it.
+        const res = await decodeRun(await api.simulate({ scenarioId, blockage, horizonMin }))
         applyRun(res)
+        setSeries(buildSeries(res))
         refreshDataStatus()
-        api
-          .getSeries(res.run_id)
-          .then(setSeries)
-          .catch((e) => notify(e.message, 'error'))
         if (isLive) {
           setLiveAttempt({
             status: 'success',
@@ -330,18 +332,13 @@ export function FloodNetProvider({ children }) {
       startStageCycle()
       try {
         const c = await api.compare({ scenarioId, blockage: spec, horizonMin })
-        setCompareResult(c)
+        const { complete, ...blockedSide } = c.blocked
+        const blockedRun = await decodeRun(complete)             // the blocked run, complete (as for a forecast)
+        setCompareResult({ ...c, blocked: blockedSide })
         framesRef.current = new Map()
-        setRun({
-          run_id: c.blocked.run_id,
-          scenario_id: scenarioId,
-          frames_t_min: c.frames_t_min,
-          summary: c.blocked.summary,
-          provenance: c.provenance,
-          blockage: spec,
-          __isCompareBlocked: true,
-        })
-        setSeries(null)
+        setFrame(null)
+        setRun({ ...blockedRun, provenance: c.provenance, blockage: spec, __isCompareBlocked: true })
+        setSeries(buildSeries(blockedRun))
         setSelectedSegId(null)
         setExplain(null)
         // Same reasoning as applyRun(): a new compare run invalidates any route/alternatives computed
@@ -362,48 +359,19 @@ export function FloodNetProvider({ children }) {
   )
 
   // ---------------------------------------------------------------- timeline / frames
+  // Frames are rebuilt from the run on screen (lib/runBundle.js), never fetched: the run is already complete in
+  // the browser. Street lines need the road geometry, so a frame is (re)built as soon as the roads are loaded.
   useEffect(() => {
-    if (!run) return
-    let cancelled = false
+    if (!run?.bundle) return
     const cached = framesRef.current.get(currentT)
     if (cached) {
       setFrame(cached)
       return
     }
-    api
-      .getFrame(run.run_id, currentT)
-      .then((f) => {
-        if (cancelled) return
-        framesRef.current.set(currentT, f)
-        setFrame(f)
-      })
-      .catch((e) => !cancelled && notify(e.message))
-    return () => {
-      cancelled = true
-    }
-  }, [run, currentT, notify])
-
-  // background prefetch of the rest of the run's frames so scrubbing/playback is instant
-  useEffect(() => {
-    if (!run?.frames_t_min?.length) return
-    let cancelled = false
-    ;(async () => {
-      for (const t of run.frames_t_min) {
-        if (cancelled) return
-        if (framesRef.current.has(t)) continue
-        try {
-          const f = await api.getFrame(run.run_id, t)
-          if (cancelled) return
-          framesRef.current.set(t, f)
-        } catch {
-          return
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [run])
+    const f = buildFrame(run, frameIndex(run, currentT), roads)
+    if (roads) framesRef.current.set(currentT, f)
+    setFrame(f)
+  }, [run, currentT, roads])
 
   const playTimerRef = useRef(null)
   useEffect(() => {
@@ -429,8 +397,7 @@ export function FloodNetProvider({ children }) {
       setExplainLoading(true)
       setExplainError(null)
       try {
-        const data = await api.explainSegment(run.run_id, segId, currentT)
-        setExplain(data)
+        setExplain(explainFromRun(run, segId, currentT, roads))
       } catch (e) {
         setExplainError(e.message)
         setExplain(null)
@@ -438,7 +405,7 @@ export function FloodNetProvider({ children }) {
         setExplainLoading(false)
       }
     },
-    [run, currentT],
+    [run, currentT, roads],
   )
 
   // re-explain automatically as the timeline moves, while a segment stays selected
@@ -452,7 +419,10 @@ export function FloodNetProvider({ children }) {
     async ({ origin, dest, vehicle, tMin = currentT }) => {
       setRoute((r) => ({ ...r, origin, dest, vehicle, loading: true, error: null }))
       try {
-        const result = await api.findRoute({ origin, dest, vehicle, tMin, runId: run?.run_id ?? null })
+        const result = await api.findRoute({
+          origin, dest, vehicle, tMin, runId: run?.run_id ?? null, dataMode: run?.data_mode ?? null,
+          streetDepthM: run?.bundle ? frameDepths(run, frameIndex(run, tMin)) : null,
+        })
         setRoute({ origin, dest, vehicle, result, error: null, loading: false })
       } catch (e) {
         setRoute({ origin, dest, vehicle, result: null, error: e.message, loading: false })
@@ -481,7 +451,12 @@ export function FloodNetProvider({ children }) {
     async ({ origin, dest, vehicle, tMin = currentT, nCandidates = 3 }) => {
       setAlternatives((a) => ({ ...a, loading: true, error: null }))
       try {
-        const result = await api.findRouteAlternatives({ origin, dest, vehicle, tMin, runId: run?.run_id ?? null, nCandidates })
+        const series = run?.bundle ? wetSeries(run) : null
+        const result = await api.findRouteAlternatives({
+          origin, dest, vehicle, tMin, runId: run?.run_id ?? null, nCandidates, dataMode: run?.data_mode ?? null,
+          streetDepthM: run?.bundle ? frameDepths(run, frameIndex(run, tMin)) : null,
+          seriesTMin: series?.t_min ?? null, streetsCm: series?.streets ?? null,
+        })
         const rec = result?.recommended || {}
         const defaultSelected = rec.balanced ?? rec.safest ?? rec.fastest ?? (result?.candidates?.length ? 0 : null)
         setAlternatives({ result, error: null, loading: false, selected: defaultSelected })

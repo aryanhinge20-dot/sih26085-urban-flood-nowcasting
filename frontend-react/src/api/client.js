@@ -39,6 +39,11 @@ async function request(path, { method = 'GET', body } = {}) {
   } catch {
     // non-JSON body (e.g. empty 204) -- leave data null
   }
+  if (res.status === 504) {
+    // the hosting platform stopped the request at its time limit (Vercel: FUNCTION_INVOCATION_TIMEOUT)
+    throw new ApiError('The server did not finish within its time limit (300 s on the current hosting plan). '
+      + 'Try a shorter forecast horizon.', { status: 504, detail: data, path })
+  }
   if (!res.ok) {
     const detail = (data && (data.detail || data.error)) || res.statusText
     throw new ApiError(
@@ -62,116 +67,49 @@ export const getTerrain = () => request('/api/terrain')
 export const getDem = () => request('/api/terrain/dem')
 export const getDataStatus = () => request('/api/data-status')
 
-// ---------------------------------------------------------------- run recovery (serverless hosting)
-// A run lives in the memory of the backend instance that computed it. On Vercel a follow-up request can reach a
-// different or freshly started instance, which answers 404 {code: "run_not_found"}. The client then re-runs the
-// SAME request once (one re-run shared by all callers), maps the old run_id to the new one, and retries. The UI
-// keeps its original run_id. Scenario runs come back identical; a live/forecast run is recomputed from the
-// rainfall available at that moment.
-const regenerators = new Map()   // run_id -> () => Promise<new run_id>
-const aliases = new Map()        // original run_id -> replacement run_id
-const inFlight = new Map()       // original run_id -> Promise<new run_id>
-
-const isRunNotFound = (e) => e instanceof ApiError && e.status === 404 && e.detail?.detail?.code === 'run_not_found'
-
-function remember(runId, regenerate) {
-  if (runId) regenerators.set(runId, regenerate)
-}
-
-function regenerate(runId) {
-  if (!inFlight.has(runId)) {
-    const p = regenerators.get(runId)()
-      .then((fresh) => { aliases.set(runId, fresh); return fresh })
-      .finally(() => inFlight.delete(runId))
-    inFlight.set(runId, p)
-  }
-  return inFlight.get(runId)
-}
-
-async function withRun(runId, call) {
-  if (runId == null) return call(runId)
-  try {
-    return await call(aliases.get(runId) ?? runId)
-  } catch (e) {
-    if (!isRunNotFound(e) || !regenerators.has(runId)) throw e
-    return call(await regenerate(runId))
-  }
-}
-
-// (getHotspots above = MCGM's known flood spots; this is the run-derived hotspot summary)
-export const getFloodIntelligence = (runId) =>
-  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/hotspots`))
-
-export const getAlert = (runId) =>
-  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/alert`))
-
 // ---------------------------------------------------------------- simulation
-const postSimulate = ({ scenarioId, blockage, horizonMin = 180 }) =>
+// Each of these returns the COMPLETE run (backend/floodnet/api/bundle.py; decoded by lib/runBundle.js). There
+// is deliberately no "fetch a run by id" call: on serverless hosting the next request may reach a different
+// server instance, which does not hold the run.
+export const simulate = ({ scenarioId, blockage, horizonMin = 180 }) =>
   request('/api/simulate', {
     method: 'POST',
     body: { scenario_id: scenarioId, blockage: blockage ?? { mode: 'none' }, horizon_min: horizonMin },
   })
 
-export const simulate = async (args) => {
-  const res = await postSimulate(args)
-  remember(res?.run_id, async () => (await postSimulate(args)).run_id)
-  return res
-}
-
-export const getRun = (runId) => withRun(runId, (id) => request(`/api/simulate/${encodeURIComponent(id)}`))
-
-export const getFrame = (runId, tMin) =>
-  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/frame/${tMin}`))
-
-export const getSeries = (runId) =>
-  withRun(runId, (id) => request(`/api/simulation/${encodeURIComponent(id)}/series`))
-
-export const explainSegment = (runId, segId, tMin) =>
-  withRun(runId, (id) => request(
-    `/api/simulation/${encodeURIComponent(id)}/explain/${encodeURIComponent(segId)}` +
-      (tMin != null ? `?t_min=${tMin}` : ''),
-  ))
-
-const postCompare = ({ scenarioId, blockage, horizonMin = 180 }) =>
+export const compare = ({ scenarioId, blockage, horizonMin = 180 }) =>
   request('/api/compare', {
     method: 'POST',
     body: { scenario_id: scenarioId, blockage, horizon_min: horizonMin },
   })
 
-export const compare = async (args) => {
-  const res = await postCompare(args)
-  remember(res?.blocked?.run_id, async () => (await postCompare(args)).blocked.run_id)
-  remember(res?.normal?.run_id, async () => (await postCompare(args)).normal.run_id)
-  return res
-}
-
-const postReplay = ({ blockage, horizonMin = 180 } = {}) =>
+export const stormReplay = ({ blockage, horizonMin = 180 } = {}) =>
   request('/api/storm/replay', {
     method: 'POST',
     body: { blockage: blockage ?? { mode: 'none' }, horizon_min: horizonMin },
   })
 
-export const stormReplay = async (args = {}) => {
-  const res = await postReplay(args)
-  remember(res?.run_id, async () => (await postReplay(args)).run_id)
-  return res
-}
-
 // ---------------------------------------------------------------- routing
-export const findRoute = ({ origin, dest, tMin = 0, vehicle = 'car', runId = null }) =>
-  withRun(runId, (id) => request('/api/route', {
-    method: 'POST',
-    body: { origin, dest, t_min: tMin, vehicle, run_id: id },
-  }))
+// The route is computed on the depths of the frame on screen, sent WITH the request (only wet segments; a missing
+// segment is dry), so routing never depends on the server holding the run.
+const routeBody = ({ origin, dest, tMin, vehicle, runId, streetDepthM, seriesTMin, streetsCm, dataMode }) => ({
+  origin, dest, t_min: tMin, vehicle, run_id: runId,
+  street_depth_m: streetDepthM ?? null, series_t_min: seriesTMin ?? null, streets_cm: streetsCm ?? null, data_mode: dataMode ?? null,
+})
+
+export const findRoute = ({ origin, dest, tMin = 0, vehicle = 'car', runId = null, streetDepthM = null, dataMode = null }) =>
+  request('/api/route', { method: 'POST', body: routeBody({ origin, dest, tMin, vehicle, runId, streetDepthM, dataMode }) })
 
 // Multiple candidate routes scored under three objectives (see backend/floodnet/routing/router.py
 // safe_routes_multi's docstring): "safest" (flood-depth-penalised), "fastest" (DISTANCE only -- there is no
 // travel-time/speed model anywhere in the graph, so this must stay labelled "by distance" wherever it is
 // shown), and "balanced" (a blended objective between the two). Each candidate also carries `time_safety`
-// (safe-through-T+X vs. unsafe-by-T+X) when a simulation run is active, computed from the same per-segment
-// series GET /api/simulation/{run_id}/series already serves.
-export const findRouteAlternatives = ({ origin, dest, tMin = 0, vehicle = 'car', runId = null, nCandidates = 3 }) =>
-  withRun(runId, (id) => request('/api/route/alternatives', {
+// (safe-through-T+X vs. unsafe-by-T+X) when the run's per-segment series is sent with the request.
+export const findRouteAlternatives = ({
+  origin, dest, tMin = 0, vehicle = 'car', runId = null, nCandidates = 3, streetDepthM = null, seriesTMin = null,
+  streetsCm = null, dataMode = null,
+}) =>
+  request('/api/route/alternatives', {
     method: 'POST',
-    body: { origin, dest, t_min: tMin, vehicle, run_id: id, n_candidates: nCandidates },
-  }))
+    body: { ...routeBody({ origin, dest, tMin, vehicle, runId, streetDepthM, seriesTMin, streetsCm, dataMode }), n_candidates: nCandidates },
+  })

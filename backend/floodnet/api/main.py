@@ -594,10 +594,38 @@ async def _simulate(scenario_id: str, blockage: dict, horizon_min: int) -> Simul
 
 
 # ----------------------------------------------------------------------------- simulation endpoints
+# Longest forecast horizon accepted. On Vercel a request must finish inside the function's maxDuration (300 s on
+# Hobby); a 720-min run measured ~235-240 s on one fast laptop core, so it is refused there with a clear message
+# instead of being cut off mid-run. FLOODNET_MAX_HORIZON_MIN overrides.
+MAX_HORIZON_MIN = int(os.environ.get("FLOODNET_MAX_HORIZON_MIN") or (360 if config.ON_VERCEL else 720))
+
+
+def _check_horizon(horizon_min: int) -> None:
+    if horizon_min > MAX_HORIZON_MIN:
+        raise HTTPException(422, f"horizon_min {horizon_min} exceeds {MAX_HORIZON_MIN} min, the longest forecast "
+                                 "this deployment can finish within its request time limit")
+
+
+async def _complete(res: SimulationResult, summary: Optional[dict] = None) -> dict:
+    """Self-contained response (api/bundle.py): everything the dashboard renders, in THIS response, so nothing
+    afterwards depends on which server instance computed the run."""
+    from .bundle import self_contained
+
+    def build() -> dict:
+        try:
+            alert, alert_error = _alert_payload(res), None
+        except ValueError as e:                                   # a run that cannot yield a CAP draft
+            alert, alert_error = None, str(e)
+        return self_contained(res, summary or summarize(res), _series_payload(res), _hotspots_payload(res),
+                              alert, alert_error, _pilot())
+    return await run_in_threadpool(build)
+
+
 @app.post("/api/simulate")
 async def simulate(req: SimulateRequest):
+    _check_horizon(req.horizon_min)
     res = await _simulate(req.scenario_id, req.blockage.to_spec(), req.horizon_min)
-    return summarize(res)
+    return await _complete(res)
 
 
 @app.get("/api/simulate/{run_id}")
@@ -625,7 +653,10 @@ _CAUSE_KEYS = ("overcapacity", "downstream", "blockage")
 
 @app.get("/api/simulation/{run_id}/series")
 def series(run_id: str):
-    res = _get_run_or_404(run_id)
+    return _series_payload(_get_run_or_404(run_id))
+
+
+def _series_payload(res: SimulationResult) -> dict:
     fr = res.frames
     p = _pilot(); net = p["net"]
     ground_floor = _node_ground_floor(net)
@@ -661,7 +692,7 @@ def series(run_id: str):
     # The raw last-sub-step flag is preserved separately as surcharging_count_instant rather than dropped:
     # it is what the solver's node_surcharging array literally contains, and older validation figures
     # (docs/VALIDATION.md) were computed from it.
-    return {"run_id": run_id, "t_min": [f.t_s / 60.0 for f in fr], "rain_mm_h": [_f(f.rain_mm_h) for f in fr],
+    return {"run_id": res.run_id, "t_min": [f.t_s / 60.0 for f in fr], "rain_mm_h": [_f(f.rain_mm_h) for f in fr],
             "surcharging_count": surcharging_count,
             "surcharging_count_instant": [int(np.sum(f.node_surcharging)) for f in fr],
             "flooded_segments": [_street_stats(f)[0] for f in fr],
@@ -792,7 +823,10 @@ def explain(run_id: str, seg_id: str, t_min: Optional[float] = None):
 def hotspots(run_id: str, top: int = 5):
     """Operational summary derived from the finished run: max depth, earliest onset, peak time, flooded area,
     affected road length / intersections and the ranked top hotspots (floodnet/analysis/hotspots.py)."""
-    res = _get_run_or_404(run_id)
+    return _hotspots_payload(_get_run_or_404(run_id), top)
+
+
+def _hotspots_payload(res: SimulationResult, top: int = 5) -> dict:
     p = _pilot()
     out = flood_intelligence(res, p.get("roads"), p.get("terrain"), top_n=max(1, min(int(top), 20)))
     out.update({"run_id": res.run_id, "data_mode": state.run_data_mode(res)})
@@ -817,17 +851,23 @@ def alert_draft(run_id: str, format: str = "json"):  # noqa: A002 -- query param
     res = _get_run_or_404(run_id)
     if format not in ("json", "xml"):
         raise HTTPException(422, f"format must be 'json' or 'xml', got {format!r}")
-    p = _pilot()
-    from ..alerts.cap import CAP_NS, build_cap_alert
     try:
-        draft = build_cap_alert(res, p["net"], p.get("roads"), data_mode=state.run_data_mode(res))
+        out = _alert_payload(res)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    xml = draft.to_xml()
     if format == "xml":
-        return Response(content=xml, media_type="application/cap+xml",
+        return Response(content=out["cap_xml"], media_type="application/cap+xml",
                         headers={"Content-Disposition":
                                  f'attachment; filename="floodnet-cap-draft-{res.run_id}.xml"'})
+    return out
+
+
+def _alert_payload(res: SimulationResult) -> dict:
+    """The CAP 1.2 DRAFT for a run (raises ValueError when the run cannot yield one)."""
+    p = _pilot()
+    from ..alerts.cap import CAP_NS, build_cap_alert
+    draft = build_cap_alert(res, p["net"], p.get("roads"), data_mode=state.run_data_mode(res))
+    xml = draft.to_xml()
     provenance = dict(res.provenance)
     provenance["blockage"] = _blockage_provenance(res)
     return {"run_id": res.run_id, "cap_namespace": CAP_NS, "cap_version": "1.2",
@@ -880,8 +920,9 @@ async def storm_replay(req: ReplayRequest):
     sid = "july2005" if "july2005" in ids else next((i for i in ids if "2005" in i), None)
     if sid is None:
         raise HTTPException(404, f"no 26-July-2005 replay scenario available; scenarios: {ids}")
+    _check_horizon(req.horizon_min)
     res = await _simulate(sid, req.blockage.to_spec(), req.horizon_min)
-    out = summarize(res); out["replay"] = True
+    out = await _complete(res); out["replay"] = True
     return out
 
 
@@ -890,6 +931,7 @@ async def compare(req: CompareRequest):
     spec = req.blockage.to_spec()
     if spec.get("mode", "none") == "none":
         raise HTTPException(422, "compare needs a blockage with mode != 'none'")
+    _check_horizon(req.horizon_min)
     normal = await _simulate(req.scenario_id, {"mode": "none"}, req.horizon_min)
     blocked = await _simulate(req.scenario_id, spec, req.horizon_min)
 
@@ -906,7 +948,7 @@ async def compare(req: CompareRequest):
                 "provenance": s["provenance"]}
     n, b = side(normal), side(blocked)
     return {"scenario_id": req.scenario_id, "blockage": spec, "frames_t_min": [f.t_s / 60.0 for f in normal.frames],
-            "normal": n, "blocked": b,
+            "normal": n, "blocked": {**b, "complete": await _complete(blocked)},
             "delta": {"max_depth_cm": b["summary"]["max_depth_cm"] - n["summary"]["max_depth_cm"],
                       "peak_flooded_segments": b["summary"]["peak_flooded_segments"] - n["summary"]["peak_flooded_segments"],
                       "peak_surcharging_nodes": b["summary"]["peak_surcharging_nodes"] - n["summary"]["peak_surcharging_nodes"]},
@@ -914,6 +956,28 @@ async def compare(req: CompareRequest):
 
 
 # ----------------------------------------------------------------------------- routing
+def _route_depths(req: RouteRequest) -> tuple[Optional[SimulationResult], dict]:
+    """Street depths to route on. Preferred: the frame's depths sent by the client from its self-contained run
+    (works on any server instance). Fallback for the local server: the run held in this process's memory."""
+    if req.street_depth_m is not None:
+        return None, {str(k): float(v) for k, v in req.street_depth_m.items()}
+    if not req.run_id:
+        return None, {}                                  # no run on screen: dry network (never "this instance's last run")
+    res: Optional[SimulationResult] = state.get_run(req.run_id)
+    if res is None:
+        raise _run_not_found(req.run_id)
+    return res, res.frames[_frame_index(res, req.t_min)].street_depth_m
+
+
+def _depth_provenance(req: RouteRequest, res: Optional[SimulationResult]) -> Optional[dict]:
+    if res is not None:
+        return res.provenance
+    if req.street_depth_m is not None:
+        return {"run_id": req.run_id, "t_min": req.t_min,
+                "note": "frame street depths supplied by the client from its self-contained run"}
+    return None
+
+
 @app.post("/api/route")
 async def route(req: RouteRequest):
     p = _pilot(); roads_graph = p.get("roads")
@@ -923,20 +987,18 @@ async def route(req: RouteRequest):
         from ..routing.router import safe_route
     except Exception as e:  # noqa: BLE001
         raise state.ModuleMissing(f"floodnet.routing.router.safe_route unavailable (Agent F): {e}")
-    res: Optional[SimulationResult] = state.get_run(req.run_id) if req.run_id else state.latest_run()
-    if req.run_id and res is None:
-        raise _run_not_found(req.run_id)
-    depth = res.frames[_frame_index(res, req.t_min)].street_depth_m if res is not None else {}
+    res, depth = _route_depths(req)
     try:
         out: Any = await run_in_threadpool(safe_route, roads_graph, depth, tuple(req.origin), tuple(req.dest), req.vehicle)
     except (ValueError, KeyError) as e:
         raise HTTPException(422, str(e))
     out = dict(out or {})
-    out.update({"t_min": req.t_min, "run_id": res.run_id if res is not None else None, "vehicle": req.vehicle,
-                "depth_source": "simulation frame" if res is not None else "no run: dry network assumed",
-                "data_mode": state.run_data_mode(res)})
-    out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(),
-                                  "depths": res.provenance if res is not None else None})
+    has_depths = res is not None or req.street_depth_m is not None
+    out.update({"t_min": req.t_min, "run_id": req.run_id or (res.run_id if res is not None else None),
+                "vehicle": req.vehicle,
+                "depth_source": "simulation frame" if has_depths else "no run: dry network assumed",
+                "data_mode": state.run_data_mode(res) if res is not None else (req.data_mode or state.run_data_mode(None))})
+    out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(), "depths": _depth_provenance(req, res)})
     return out
 
 
@@ -953,10 +1015,7 @@ async def route_alternatives(req: RouteRequest):
         from ..routing.router import safe_routes_multi, route_time_safety
     except Exception as e:  # noqa: BLE001
         raise state.ModuleMissing(f"floodnet.routing.router.safe_routes_multi unavailable (Agent F): {e}")
-    res: Optional[SimulationResult] = state.get_run(req.run_id) if req.run_id else state.latest_run()
-    if req.run_id and res is None:
-        raise _run_not_found(req.run_id)
-    depth = res.frames[_frame_index(res, req.t_min)].street_depth_m if res is not None else {}
+    res, depth = _route_depths(req)
     try:
         out: Any = await run_in_threadpool(safe_routes_multi, roads_graph, depth, tuple(req.origin),
                                            tuple(req.dest), req.vehicle, None, None, req.n_candidates)
@@ -967,20 +1026,25 @@ async def route_alternatives(req: RouteRequest):
     # Time-aware safety-through-T+X per candidate, only possible when a run (and therefore its full
     # per-segment series) is actually available -- with no run, depth is a dry-network assumption with no
     # time series behind it, so we honestly omit time_safety rather than fabricate one.
-    if res is not None:
-        limit = config.VEHICLE_LIMIT_CM.get(req.vehicle, 30)
+    t_min_series = streets_cm = None
+    if req.series_t_min is not None and req.streets_cm is not None:        # supplied by the client (self-contained)
+        t_min_series, streets_cm = list(req.series_t_min), dict(req.streets_cm)
+    elif res is not None:                                                  # local server: run held in memory
         t_min_series = [f.t_s / 60.0 for f in res.frames]
         seg_ids_all = sorted({sid for f in res.frames for sid in f.street_depth_m.keys()})
         streets_cm = {sid: [round(float(f.street_depth_m.get(sid, 0.0)) * 100.0, 1) for f in res.frames]
                       for sid in seg_ids_all}
+    if t_min_series is not None:
+        limit = config.VEHICLE_LIMIT_CM.get(req.vehicle, 30)
         for cand in out.get("candidates", []):
             cand["time_safety"] = route_time_safety(cand.get("route_segments", []), t_min_series, streets_cm, limit)
 
-    out.update({"t_min": req.t_min, "run_id": res.run_id if res is not None else None, "vehicle": req.vehicle,
-                "depth_source": "simulation frame" if res is not None else "no run: dry network assumed",
-                "data_mode": state.run_data_mode(res)})
-    out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(),
-                                  "depths": res.provenance if res is not None else None})
+    has_depths = res is not None or req.street_depth_m is not None
+    out.update({"t_min": req.t_min, "run_id": req.run_id or (res.run_id if res is not None else None),
+                "vehicle": req.vehicle,
+                "depth_source": "simulation frame" if has_depths else "no run: dry network assumed",
+                "data_mode": state.run_data_mode(res) if res is not None else (req.data_mode or state.run_data_mode(None))})
+    out.setdefault("provenance", {"roads": roads_graph.provenance.to_dict(), "depths": _depth_provenance(req, res)})
     return out
 
 

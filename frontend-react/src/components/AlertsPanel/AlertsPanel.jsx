@@ -1,5 +1,4 @@
 import { useCallback, useMemo, useState } from 'react'
-import { getAlert } from '../../api/client.js'
 import { useFloodNet } from '../../state/FloodNetContext.jsx'
 import {
   ALERT_LABEL, ADVISORY_LABEL, CATEGORY_COLOR,
@@ -8,10 +7,13 @@ import {
 import { fmt } from '../../lib/format.js'
 import styles from './AlertsPanel.module.css'
 
-// GET /api/simulation/{run_id}/alert (backend/floodnet/api/main.py::alert_draft), via the API client so a run
-// held by another serverless instance is recovered the same way as every other run request. Shape asserted by
+// The CAP draft (backend/floodnet/api/main.py::_alert_payload) arrives inside the simulation response itself, so
+// it never depends on which server instance computed the run. Shape asserted by
 // backend/tests/test_alerts_cap.py::test_alert_endpoint_contract.
-const fetchCapDraft = (runId) => getAlert(runId)
+function capDraftOf(run) {
+  if (run?.alert) return run.alert
+  throw new Error(run?.alert_error || 'No CAP draft is available for this run.')
+}
 
 function capField(draft, name) {
   return draft?.cap?.info?.[0]?.[name]
@@ -41,7 +43,7 @@ export default function AlertsPanel() {
     setCapError(null)
     setCopied(false)
     try {
-      const data = await fetchCapDraft(runId)
+      const data = capDraftOf(run)
       setCapDraft(data)
       setCapState('ready')
     } catch (e) {
@@ -49,7 +51,7 @@ export default function AlertsPanel() {
       setCapError(e.message || String(e))
       setCapState('error')
     }
-  }, [runId])
+  }, [runId, run])
 
   const copyXml = useCallback(async () => {
     if (!capDraft?.cap_xml) return

@@ -7,8 +7,8 @@
   ],
   "functions": {
     "app.py": {
-      "maxDuration": 800,
-      "excludeFiles": "{frontend-react/node_modules/**,frontend-react/src/**,frontend-react/public/**,frontend/**,research/**,docs/**,data/raw/**,data/interim/**,data/processed/pilot/swmm/**,backend/tests/**,backend/.venv/**,**/__pycache__/**,**/site-packages/*/tests/**,**/site-packages/*/*/tests/**,Dockerfile,.env,.env.*}"
+      "maxDuration": 300,
+      "excludeFiles": "{frontend-react/node_modules/**,frontend-react/src/**,frontend-react/public/**,**/site-packages/*/tests/**,**/site-packages/*/*/tests/**,.env,.env.*}"
     }
   },
   "headers": [

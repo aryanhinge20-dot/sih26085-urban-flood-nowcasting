@@ -118,7 +118,7 @@ test('an auto run shows the source it really used, and CACHED / DEMO are never u
 
 test('final-pass UI: hotspots card, street onset, source health and rotation-free token handling', () => {
   assert.match(UI, /Flood Hotspots/)
-  assert.match(UI, /getFloodIntelligence\(runId\)/)
+  assert.match(UI, /run\.hotspots/)                          // delivered with the run, not fetched by run_id
   assert.match(UI, /ONSET/)
   assert.match(UI, /Nearby drainage network is over capacity/)
   assert.doesNotMatch(UI, /this (manhole|drain) caused/i)

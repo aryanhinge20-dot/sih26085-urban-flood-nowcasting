@@ -44,6 +44,13 @@ class RouteRequest(BaseModel):
     n_candidates: int = Field(default=3, ge=2, le=5,
                               description="requested number of alternative route candidates; only used by "
                                           "POST /api/route/alternatives, ignored by POST /api/route")
+    # Self-contained runs (serverless hosting): the client sends the depths of the frame on screen, and for
+    # /alternatives the run's per-segment series, so routing never needs the run from this server's memory.
+    # Only wet segments need to be sent: a missing segment is dry.
+    street_depth_m: Optional[dict[str, float]] = None
+    series_t_min: Optional[list[float]] = None
+    streets_cm: Optional[dict[str, list[float]]] = None
+    data_mode: Optional[str] = None
 
     @field_validator("origin", "dest")
     @classmethod

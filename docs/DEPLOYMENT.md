@@ -19,7 +19,7 @@ The frontend calls the API on the **same origin** (`/api/...`). `VITE_API_BASE_U
 | `pyproject.toml` (repo root) | Vercel's Python manifest: **runtime dependencies only**, `[tool.vercel] entrypoint = "app:app"`, frontend served from the CDN (`[tool.vercel.fastapi.static] cdn = true`) |
 | `uv.lock` (repo root) | Pinned versions for that manifest |
 | `app.py` (repo root) | Entrypoint: puts `backend/` on the import path and exposes `floodnet.api.main:app` |
-| `vercel.json` | `framework: fastapi`; build command `cd frontend-react && npm ci && VITE_BASE=/ npm run build`; `regions: ["bom1"]`; function `maxDuration: 800`; `excludeFiles` for tests, raw data, docs, `.env` |
+| `vercel.json` | `framework: fastapi`; build command `cd frontend-react && npm ci && VITE_BASE=/ npm run build`; `regions: ["bom1"]`; function `maxDuration: 300` (Hobby maximum); `excludeFiles` for tests, raw data, docs, `.env` |
 | `.vercelignore` | Never uploaded: `.env*`, `backend/.venv`, `backend/tests`, `node_modules`, `data/raw`, `data/interim`, `docs`, `research` |
 | `backend/floodnet/api/main.py` | On Vercel (`VERCEL=1`), registers `app.frontend("/", directory="frontend-react/dist", fallback="index.html")`. Every API route takes priority over the frontend, and navigation requests such as `/dashboard` get `index.html`. The local-server `/` and `/static` routes are not registered there |
 
@@ -73,15 +73,18 @@ platform. The only writable disk is `/tmp`, which is per instance and not persis
 
 | State | Where it lives now | On a cold or different instance |
 |---|---|---|
-| Simulation runs (`run_id` → frames) | process memory, last 6 runs | Follow-up requests get 404 `{"code": "run_not_found"}`. The frontend API client (`src/api/client.js`) re-runs the same request once (shared by all waiting calls) and retries. Scenario runs are reproduced exactly; live/forecast runs are recomputed with the rainfall available at that moment |
+| Simulation results | **in the response itself.** `POST /api/simulate`, `/api/compare` and `/api/storm/replay` return the complete run (`backend/floodnet/api/bundle.py`): every frame's depth image data, street depths, drainage node/edge state, the series, hotspots, the CAP draft and street-inspector context. The browser rebuilds frames locally (`frontend-react/src/lib/runBundle.js`), and route requests carry the frame's depths | nothing to look up: no follow-up request needs the instance that computed the run. The per-run GET endpoints (`/api/simulation/{run_id}/…`) still work on a single local server for debugging, but the UI never calls them |
 | IMD token | process memory (`imd_auth.manager`) | Generated automatically on that instance's first IMD request (one token request per new instance) |
 | Background token keeper | **off on Vercel** (a frozen instance cannot run it) | renewal happens inside requests: no token, under 10 min left, or a 401 |
 | Last good rainfall field, decoded radar frames | `/tmp/floodnet` (`config.STATE_DIR`) | warm-instance cache only; a cold instance simply has no cached field yet |
 | Upstream response caches (IMD, ECMWF, radar) | process memory, TTL | refetched |
 | `/api/data-status` "active source" | the last run on **that** instance | may read "no run yet" on a fresh instance |
 
-No database is added. If runs ever need to survive across instances (for example, sharing a run link), the next
-step would be a small external store (Vercel Blob or KV). That is not required for the prototype.
+No database is added. Measured response sizes: 0.84 MB for 60 min, about 1.3 MB for the 180-min UI default, and
+about 2 MB for 360 min, all under Vercel's 4.5 MB response limit. A result is not kept after the page is closed or
+reloaded; if run links ever need to survive, the next step would be durable storage (Vercel Blob), not instance memory.
+On Vercel the longest horizon accepted is 360 min (`FLOODNET_MAX_HORIZON_MIN`), so a run finishes inside the
+300 s limit; longer requests get a clear 422, and a platform timeout (504) is shown as a time-limit message.
 
 ## 6. Function bundle size (measured)
 
@@ -129,9 +132,8 @@ these as lower bounds until they are measured on Vercel (§9, step 9).
 Peak memory stays under 0.6 GiB, well inside the 2 GB default. The 720-min horizon (235 s on this core) and the
 replay (128 s) are the risks against time limits.
 
-`vercel.json` sets **`maxDuration: 800`**, the Pro maximum. Static IPs already require Pro, and 800 s is supported
-with Static IPs (only the >800 s beta is not). The default 300 s would leave little margin for the 720-min horizon
-on a slower vCPU. Every response is far below Vercel's 4.5 MB response limit: the largest, one map frame, is 1.3 MiB.
+`vercel.json` sets **`maxDuration: 300`**, the Hobby maximum. The UI always runs 180 min, which measured about 66 s
+locally, and the API refuses horizons above 360 min on Vercel. On Pro this can be raised to 800 s. Every response is far below Vercel's 4.5 MB response limit: the largest, one map frame, is 1.3 MiB.
 
 ## 8. IMD authentication (automatic)
 
